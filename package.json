@@ -1,0 +1,17 @@
+{
+  "name": "chatgpt-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "cgpt": "./src/cgpt.js",
+    "cgpt-server": "./src/server.js"
+  },
+  "scripts": {
+    "server": "node src/server.js",
+    "test": "node --test src/*.test.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}

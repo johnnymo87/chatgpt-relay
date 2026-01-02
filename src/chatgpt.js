@@ -23,7 +23,27 @@ const SELECTORS = {
 
   stopButton: '[data-testid="stop-button"], button[aria-label*="Stop"]',
 
-  assistantMessage: '[data-message-author-role="assistant"]'
+  assistantMessage: '[data-message-author-role="assistant"]',
+
+  // Error state selectors
+  errorToast: [
+    '[data-testid="error-toast"]',
+    '[role="alert"]',
+    '.toast-error',
+    'div:has-text("Something went wrong")'
+  ].join(', '),
+
+  continueButton: [
+    'button:has-text("Continue generating")',
+    'button:has-text("Continue")',
+    '[data-testid="continue-button"]'
+  ].join(', '),
+
+  loginButton: [
+    'button:has-text("Log in")',
+    'button:has-text("Sign in")',
+    'a[href*="/auth"]'
+  ].join(', ')
 };
 
 /**
@@ -156,6 +176,18 @@ async function waitForResponse(page, beforeCount, timeout) {
   let stableCount = 0;
 
   while (Date.now() - startTime < timeout) {
+    // Check for error states before checking response
+    await checkErrorStates(page);
+
+    // Check for "Continue generating" button and click if present
+    const continueBtn = page.locator(SELECTORS.continueButton).first();
+    if (await continueBtn.isVisible({ timeout: 100 }).catch(() => false)) {
+      await continueBtn.click().catch(() => {});
+      stableCount = 0; // Reset stability counter
+      await page.waitForTimeout(500);
+      continue;
+    }
+
     // Use innerText (what user sees) not textContent
     const currentText = await newMsg.innerText().catch(() => '');
     const trimmed = currentText?.trim() ?? '';
@@ -181,4 +213,29 @@ async function waitForResponse(page, beforeCount, timeout) {
   }
 
   throw new Error('Timeout waiting for ChatGPT response');
+}
+
+/**
+ * Check for error states and throw descriptive errors.
+ * @param {import('playwright').Page} page
+ */
+async function checkErrorStates(page) {
+  // Check for logged out state (URL redirect to auth)
+  const url = page.url();
+  if (url.includes('/auth') || url.includes('login.openai.com')) {
+    throw new Error('Session expired. Run cgpt-login to log in again.');
+  }
+
+  // Check for login button on page
+  const loginBtn = page.locator(SELECTORS.loginButton).first();
+  if (await loginBtn.isVisible({ timeout: 100 }).catch(() => false)) {
+    throw new Error('Session expired. Run cgpt-login to log in again.');
+  }
+
+  // Check for error toast
+  const errorToast = page.locator(SELECTORS.errorToast).first();
+  if (await errorToast.isVisible({ timeout: 100 }).catch(() => false)) {
+    const errorText = await errorToast.innerText().catch(() => 'Unknown error');
+    throw new Error(`ChatGPT error: ${errorText.trim()}`);
+  }
 }

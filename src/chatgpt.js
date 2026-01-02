@@ -132,84 +132,74 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
 
 /**
  * Wait for the assistant's response to complete.
- * Tracks message count to ensure we get the response to THIS prompt.
+ * Uses stop button lifecycle: visible (generating) -> hidden (done)
+ * This is more reliable than counting DOM nodes for React SPAs.
  * @param {import('playwright').Page} page
  * @param {number} beforeCount - Number of assistant messages before sending
  * @param {number} timeout - Max wait time in ms
  * @returns {Promise<string>}
  */
 async function waitForResponse(page, beforeCount, timeout) {
-  const assistantMsgs = page.locator(SELECTORS.assistantMessage);
   const stopBtn = page.locator(SELECTORS.stopButton);
 
-  // Wait for a NEW assistant message to appear
+  // Step 1: Wait for stop button to APPEAR (generation started)
   try {
-    await page.waitForFunction(
-      ({ sel, n }) => document.querySelectorAll(sel).length > n,
-      { sel: SELECTORS.assistantMessage, n: beforeCount },
-      { timeout: Math.min(timeout, 30000) }
-    );
+    await stopBtn.waitFor({ state: 'visible', timeout: 30000 });
   } catch {
-    throw new Error('No response received from ChatGPT. Are you logged in?');
+    // Stop button might not appear for very fast responses, continue anyway
   }
 
-  // Get the new message (first one after beforeCount)
-  const newMsg = assistantMsgs.nth(beforeCount);
+  // Step 2: Wait for stop button to DISAPPEAR (generation ended)
+  await stopBtn.waitFor({ state: 'hidden', timeout }).catch(() => {});
 
-  // Wait for it to have some content
-  await page.waitForFunction(
-    (sel, idx) => {
-      const msgs = document.querySelectorAll(sel);
-      const msg = msgs[idx];
-      return msg && msg.innerText && msg.innerText.trim().length > 0;
-    },
-    [SELECTORS.assistantMessage, beforeCount],
-    { timeout: Math.min(timeout, 30000) }
-  ).catch(() => {});
+  // Step 3: Get the last assistant message
+  const lastAssistant = page.locator(SELECTORS.assistantMessage).last();
 
-  // Wait for generation to stop (stop button disappears)
-  await stopBtn.waitFor({ state: 'detached', timeout }).catch(() => {});
+  // Wait for it to be visible
+  try {
+    await lastAssistant.waitFor({ state: 'visible', timeout: 10000 });
+  } catch {
+    throw new Error('No assistant message found after generation completed');
+  }
 
-  // Wait for text stability (stops changing for ~1s)
+  // Step 4: Wait for text to stabilize (stops changing for ~1.5s)
   const startTime = Date.now();
   let lastText = '';
-  let stableCount = 0;
+  let stableMs = 0;
+  const stabilityThreshold = 1500; // 1.5 seconds of no changes
 
   while (Date.now() - startTime < timeout) {
-    // Check for error states before checking response
+    // Check for error states
     await checkErrorStates(page);
 
     // Check for "Continue generating" button and click if present
     const continueBtn = page.locator(SELECTORS.continueButton).first();
     if (await continueBtn.isVisible({ timeout: 100 }).catch(() => false)) {
       await continueBtn.click().catch(() => {});
-      stableCount = 0; // Reset stability counter
+      stableMs = 0;
       await page.waitForTimeout(500);
       continue;
     }
 
-    // Use innerText (what user sees) not textContent
-    const currentText = await newMsg.innerText().catch(() => '');
-    const trimmed = currentText?.trim() ?? '';
+    const currentText = (await lastAssistant.innerText().catch(() => '')).trim();
 
-    if (trimmed && trimmed === lastText) {
-      stableCount++;
-      if (stableCount >= 2) {
-        // Stable for ~1s (2 cycles at 500ms)
-        return trimmed;
+    if (currentText && currentText === lastText) {
+      stableMs += 250;
+      if (stableMs >= stabilityThreshold) {
+        return currentText;
       }
     } else {
-      stableCount = 0;
-      lastText = trimmed;
+      stableMs = 0;
+      lastText = currentText;
     }
 
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(250);
   }
 
   // Timeout - return whatever we have
-  const finalText = await newMsg.innerText().catch(() => '');
-  if (finalText?.trim()) {
-    return finalText.trim();
+  const finalText = (await lastAssistant.innerText().catch(() => '')).trim();
+  if (finalText) {
+    return finalText;
   }
 
   throw new Error('Timeout waiting for ChatGPT response');

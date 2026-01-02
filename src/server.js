@@ -129,11 +129,15 @@ async function main() {
   console.log('[ask-question-server] Starting headless browser...');
   console.log(`[ask-question-server] Using session: ${STORAGE_STATE_FILE}`);
 
-  // Launch headless browser with saved session state
+  // Launch browser with anti-throttling flags
+  // See: https://developer.chrome.com/docs/web-platform/page-lifecycle-api
   browser = await chromium.launch({
     headless: true,
     args: [
-      '--disable-blink-features=AutomationControlled'
+      '--disable-blink-features=AutomationControlled',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding'
     ]
   });
 
@@ -145,7 +149,7 @@ async function main() {
   // Open ChatGPT page
   page = await context.newPage();
   await page.goto('https://chatgpt.com');
-  console.log('[ask-question-server] ChatGPT page opened (headless).');
+  console.log('[ask-question-server] ChatGPT page opened.');
 
   // Start HTTP server
   const server = http.createServer(handleRequest);

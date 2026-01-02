@@ -82,11 +82,11 @@ export async function navigateToNewChat(page) {
  * @param {import('playwright').Page} page
  * @param {string} prompt
  * @param {object} opts
- * @param {number} opts.timeout - Max wait time in ms (default: 120000)
+ * @param {number} opts.timeout - Max wait time in ms (default: 600000)
  * @returns {Promise<string>} The assistant's response text
  */
 export async function sendPromptAndWait(page, prompt, opts = {}) {
-  const timeout = opts.timeout ?? 120000;
+  const timeout = opts.timeout ?? 600000;
 
   // Use Locator which re-resolves on each action (no stale element issues)
   const composer = page.locator(SELECTORS.composer).first();

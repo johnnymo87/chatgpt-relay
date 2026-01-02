@@ -30,7 +30,7 @@ let shuttingDown = false;
  * Process a prompt request (serialized via queue).
  */
 async function processRequest(prompt, opts = {}) {
-  const { timeout = 120000, newChat = false } = opts;
+  const { timeout = 600000, newChat = false } = opts;
 
   // Ensure we have a page
   if (!page || page.isClosed()) {

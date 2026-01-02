@@ -20,7 +20,7 @@ Send a prompt to ChatGPT and get the response.
 Options:
   -f, --file <path>     Read prompt from file
   -o, --output <path>   Write response to file
-  -t, --timeout <ms>    Response timeout (default: 120000)
+  -t, --timeout <ms>    Response timeout (default: 600000 / 10 min)
   --new-chat            Start a new chat (don't reuse existing)
   -h, --help            Show this help
 
@@ -54,7 +54,7 @@ function parseCLIArgs(args) {
     prompt: positionals.join(' ') || null,
     file: values.file ?? null,
     output: values.output ?? null,
-    timeout: values.timeout ? parseInt(values.timeout, 10) : 120000,
+    timeout: values.timeout ? parseInt(values.timeout, 10) : 600000,
     newChat: values['new-chat'] ?? false
   };
 }
@@ -82,7 +82,7 @@ function pbcopy(text) {
 }
 
 async function askServer(prompt, opts = {}) {
-  const { timeout = 120000, newChat = false } = opts;
+  const { timeout = 600000, newChat = false } = opts;
 
   const res = await fetch(`${SERVER_URL}/ask`, {
     method: 'POST',

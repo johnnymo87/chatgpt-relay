@@ -1,6 +1,6 @@
 # ChatGPT Relay Implementation Plan (Playwright)
 
-> **Status:** COMPLETED (2026-01-01)
+> **Status:** CORE COMPLETE (2026-01-01)
 >
 > **Architecture Changed:** Original plan used `launchServer()` + WebSocket `connect()`.
 > Actual implementation uses HTTP daemon + `storageState` because `launchServer()`
@@ -16,16 +16,55 @@
 
 ---
 
+## Implementation Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| cgpt-login | ✅ Done | One-time headed login, saves storageState |
+| cgpt-server | ✅ Done | Headless daemon, HTTP API, request queue |
+| cgpt CLI | ✅ Done | HTTP client, clipboard, file I/O |
+| /research-complete | ✅ Done | Claude-Code-Remote endpoint for notifications |
+| /ask-question integration | 🔲 Next | Auto-send to ChatGPT after drafting (cgpt-m2m) |
+
+---
+
+## Next Steps
+
+### Immediate: /ask-question Integration (cgpt-m2m)
+
+Update `~/Code/dotfiles/.claude/commands/ask-question.md` to:
+1. Draft question to file (existing)
+2. Invoke `cgpt -f question.md -o answer.md` (new)
+3. Read answer file and discuss (new)
+
+Optional `draft` argument skips automation for manual workflow.
+
+### Future: Async Research Mode
+
+Currently cgpt runs synchronously (~30-120s blocking). Alternative architecture:
+- Run cgpt in background
+- Claude continues working on other tasks
+- `/research-complete` injects "Please read X and let's discuss it"
+- Claude picks up the answer when ready
+
+This enables "fire and forget" research while multitasking.
+
+---
+
 ## Project Structure
 
 ```
 chatgpt-relay/
 ├── docs/
+│   ├── architecture.md
+│   └── plans/
 ├── src/
-│   ├── server.js      # Browser server daemon
-│   ├── cgpt.js        # CLI tool
+│   ├── server.js      # HTTP daemon (headless browser)
+│   ├── login.js       # One-time login helper
+│   ├── cgpt.js        # CLI tool (HTTP client)
 │   ├── chatgpt.js     # ChatGPT DOM automation
-│   └── session.js     # Claude session discovery
+│   ├── session.js     # Claude session discovery
+│   └── session.test.js
 ├── package.json
 └── .gitignore
 ```

@@ -143,14 +143,21 @@ async function waitForResponse(page, beforeCount, timeout) {
   const stopBtn = page.locator(SELECTORS.stopButton);
 
   // Step 1: Wait for stop button to APPEAR (generation started)
+  console.log('[chatgpt] Waiting for generation to start...');
   try {
     await stopBtn.waitFor({ state: 'visible', timeout: 30000 });
+    console.log('[chatgpt] Generation started (stop button visible)');
   } catch {
     // Stop button might not appear for very fast responses, continue anyway
+    console.log('[chatgpt] Stop button not seen, continuing...');
   }
 
   // Step 2: Wait for stop button to DISAPPEAR (generation ended)
-  await stopBtn.waitFor({ state: 'hidden', timeout }).catch(() => {});
+  console.log('[chatgpt] Waiting for generation to complete...');
+  await stopBtn.waitFor({ state: 'hidden', timeout }).catch(() => {
+    console.log('[chatgpt] Stop button wait timed out');
+  });
+  console.log('[chatgpt] Generation complete');
 
   // Step 3: Get the last assistant message
   const lastAssistant = page.locator(SELECTORS.assistantMessage).last();
@@ -163,6 +170,7 @@ async function waitForResponse(page, beforeCount, timeout) {
   }
 
   // Step 4: Wait for text to stabilize (stops changing for ~1.5s)
+  console.log('[chatgpt] Waiting for response to stabilize...');
   const startTime = Date.now();
   let lastText = '';
   let stableMs = 0;
@@ -175,6 +183,7 @@ async function waitForResponse(page, beforeCount, timeout) {
     // Check for "Continue generating" button and click if present
     const continueBtn = page.locator(SELECTORS.continueButton).first();
     if (await continueBtn.isVisible({ timeout: 100 }).catch(() => false)) {
+      console.log('[chatgpt] Clicking "Continue generating"...');
       await continueBtn.click().catch(() => {});
       stableMs = 0;
       await page.waitForTimeout(500);
@@ -186,6 +195,7 @@ async function waitForResponse(page, beforeCount, timeout) {
     if (currentText && currentText === lastText) {
       stableMs += 250;
       if (stableMs >= stabilityThreshold) {
+        console.log(`[chatgpt] Response stabilized (${currentText.length} chars)`);
         return currentText;
       }
     } else {
@@ -199,6 +209,7 @@ async function waitForResponse(page, beforeCount, timeout) {
   // Timeout - return whatever we have
   const finalText = (await lastAssistant.innerText().catch(() => '')).trim();
   if (finalText) {
+    console.log(`[chatgpt] Timeout but have partial response (${finalText.length} chars)`);
     return finalText;
   }
 

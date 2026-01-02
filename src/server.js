@@ -74,6 +74,78 @@ async function handleRequest(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && req.url === '/wake') {
+    try {
+      // Try to "wake up" the page
+      await page.bringToFront();
+      await page.mouse.move(500, 300);
+      await page.waitForTimeout(100);
+      await page.evaluate(() => {
+        // Force React to re-render by triggering a small DOM change
+        document.body.style.zoom = '100.01%';
+        setTimeout(() => { document.body.style.zoom = '100%'; }, 50);
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, action: 'wake' }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/reload') {
+    try {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, action: 'reload' }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/diagnose') {
+    try {
+      // Screenshot
+      await page.screenshot({ path: '/tmp/chatgpt-debug.png', fullPage: true });
+
+      // Gather DOM info
+      const diagnostics = await page.evaluate(() => {
+        const msgs = document.querySelectorAll('[data-message-author-role]');
+        const msgInfo = Array.from(msgs).map(m => ({
+          role: m.getAttribute('data-message-author-role'),
+          textLength: m.innerText?.length || 0,
+          text: m.innerText?.slice(0, 200) || '',
+          visible: m.offsetParent !== null
+        }));
+
+        const stopBtn = document.querySelector('[data-testid="stop-button"]');
+        const composer = document.querySelector('div[contenteditable="true"][data-placeholder]');
+
+        return {
+          url: window.location.href,
+          messages: msgInfo,
+          stopButtonVisible: stopBtn?.offsetParent !== null,
+          composerVisible: composer?.offsetParent !== null,
+          composerText: composer?.innerText?.slice(0, 100) || ''
+        };
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        screenshot: '/tmp/chatgpt-debug.png',
+        ...diagnostics
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/ask') {
     let body = '';
     for await (const chunk of req) {

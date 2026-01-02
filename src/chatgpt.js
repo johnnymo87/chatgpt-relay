@@ -88,6 +88,9 @@ export async function navigateToNewChat(page) {
 export async function sendPromptAndWait(page, prompt, opts = {}) {
   const timeout = opts.timeout ?? 600000;
 
+  // Check login state before attempting to fill composer
+  await assertLoggedIn(page);
+
   // Use Locator which re-resolves on each action (no stale element issues)
   const composer = page.locator(SELECTORS.composer).first();
 
@@ -217,21 +220,43 @@ async function waitForResponse(page, beforeCount, timeout) {
 }
 
 /**
- * Check for error states and throw descriptive errors.
+ * Check if the user is logged in to ChatGPT.
  * @param {import('playwright').Page} page
+ * @returns {Promise<boolean>}
  */
-async function checkErrorStates(page) {
+export async function isLoggedIn(page) {
   // Check for logged out state (URL redirect to auth)
   const url = page.url();
   if (url.includes('/auth') || url.includes('login.openai.com')) {
-    throw new Error('Session expired. Run cgpt-login to log in again.');
+    return false;
   }
 
   // Check for login button on page
   const loginBtn = page.locator(SELECTORS.loginButton).first();
-  if (await loginBtn.isVisible({ timeout: 100 }).catch(() => false)) {
-    throw new Error('Session expired. Run cgpt-login to log in again.');
+  if (await loginBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+    return false;
   }
+
+  return true;
+}
+
+/**
+ * Assert that the user is logged in, throwing a clear error if not.
+ * @param {import('playwright').Page} page
+ */
+export async function assertLoggedIn(page) {
+  if (!(await isLoggedIn(page))) {
+    throw new Error('Not logged in to ChatGPT. Run "ask-question-login" first.');
+  }
+}
+
+/**
+ * Check for error states and throw descriptive errors.
+ * @param {import('playwright').Page} page
+ */
+async function checkErrorStates(page) {
+  // Check for logged out state
+  await assertLoggedIn(page);
 
   // Check for error toast
   const errorToast = page.locator(SELECTORS.errorToast).first();

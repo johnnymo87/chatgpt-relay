@@ -12,7 +12,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { navigateToNewChat, sendPromptAndWait } from './chatgpt.js';
+import { navigateToNewChat, sendPromptAndWait, isLoggedIn } from './chatgpt.js';
 
 const STORAGE_STATE_FILE = process.env.ASK_QUESTION_STORAGE_STATE_FILE ||
   path.join(os.homedir(), '.chatgpt-relay/storage-state.json');
@@ -149,7 +149,17 @@ async function main() {
   // Open ChatGPT page
   page = await context.newPage();
   await page.goto('https://chatgpt.com');
+  await page.waitForLoadState('domcontentloaded');
   console.log('[ask-question-server] ChatGPT page opened.');
+
+  // Verify we're logged in
+  if (!(await isLoggedIn(page))) {
+    console.error('[ask-question-server] Error: Not logged in to ChatGPT.');
+    console.error('[ask-question-server] Session may have expired. Run "ask-question-login" to log in again.');
+    await browser.close();
+    process.exit(1);
+  }
+  console.log('[ask-question-server] Login verified.');
 
   // Start HTTP server
   const server = http.createServer(handleRequest);

@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 
+/**
+ * ChatGPT Relay CLI
+ *
+ * Sends prompts to the cgpt-server daemon via HTTP.
+ */
+
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { chromium } from 'playwright';
+import { parseArgs } from 'node:util';
 import { discoverSessionId } from './session.js';
-import { getOrCreateChatGPTPage, navigateToNewChat, sendPromptAndWait } from './chatgpt.js';
 
-const WS_ENDPOINT_FILE = process.env.CGPT_WS_ENDPOINT_FILE ||
-  path.join(os.tmpdir(), 'cgpt-ws-endpoint');
+const SERVER_URL = process.env.CGPT_SERVER_URL || 'http://127.0.0.1:3033';
 
 function usage() {
-  console.log(`Usage: cgpt [options] [prompt]
+  console.log(`Usage: cgpt [options] [prompt...]
 
 Send a prompt to ChatGPT and get the response.
 
@@ -26,43 +30,40 @@ Options:
 
 Examples:
   cgpt "What is the capital of France?"
+  cgpt What is the capital of France?
   cgpt -f question.md -o answer.md
   echo "Explain async/await" | cgpt
 `);
   process.exit(0);
 }
 
-function parseArgs(args) {
-  const result = {
-    prompt: null,
-    file: null,
-    output: null,
-    session: null,
-    timeout: 120000,
-    newChat: false
-  };
+function parseCLIArgs(args) {
+  const { values, positionals } = parseArgs({
+    args,
+    options: {
+      file: { type: 'string', short: 'f' },
+      output: { type: 'string', short: 'o' },
+      session: { type: 'string', short: 's' },
+      timeout: { type: 'string', short: 't' },
+      'new-chat': { type: 'boolean' },
+      help: { type: 'boolean', short: 'h' },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-
-    if (arg === '-h' || arg === '--help') {
-      usage();
-    } else if (arg === '-f' || arg === '--file') {
-      result.file = args[++i];
-    } else if (arg === '-o' || arg === '--output') {
-      result.output = args[++i];
-    } else if (arg === '-s' || arg === '--session') {
-      result.session = args[++i];
-    } else if (arg === '-t' || arg === '--timeout') {
-      result.timeout = parseInt(args[++i], 10);
-    } else if (arg === '--new-chat') {
-      result.newChat = true;
-    } else if (!arg.startsWith('-')) {
-      result.prompt = arg;
-    }
+  if (values.help) {
+    usage();
   }
 
-  return result;
+  return {
+    prompt: positionals.join(' ') || null,
+    file: values.file ?? null,
+    output: values.output ?? null,
+    session: values.session ?? null,
+    timeout: values.timeout ? parseInt(values.timeout, 10) : 120000,
+    newChat: values['new-chat'] ?? false
+  };
 }
 
 async function readStdin() {
@@ -107,8 +108,39 @@ async function notifyClaudeCodeRemote(sessionId, answerFile) {
   }
 }
 
+async function askServer(prompt, opts = {}) {
+  const { timeout = 120000, newChat = false } = opts;
+
+  const res = await fetch(`${SERVER_URL}/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, timeout, newChat }),
+    signal: AbortSignal.timeout(timeout + 10000) // Extra buffer for HTTP overhead
+  });
+
+  const data = await res.json();
+
+  if (!data.ok) {
+    throw new Error(data.error || 'Unknown server error');
+  }
+
+  return data.text;
+}
+
+async function checkServerHealth() {
+  try {
+    const res = await fetch(`${SERVER_URL}/health`, {
+      signal: AbortSignal.timeout(2000)
+    });
+    const data = await res.json();
+    return data.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseCLIArgs(process.argv.slice(2));
 
   // Get prompt
   let prompt = args.prompt;
@@ -123,32 +155,24 @@ async function main() {
     usage();
   }
 
-  // Read WebSocket endpoint
-  if (!fs.existsSync(WS_ENDPOINT_FILE)) {
-    console.error('Error: Browser server not running.');
+  // Check server is running
+  const serverOk = await checkServerHealth();
+  if (!serverOk) {
+    console.error('Error: Server not running or not responding.');
     console.error('Start it with: cgpt-server');
     process.exit(1);
   }
 
-  const wsEndpoint = fs.readFileSync(WS_ENDPOINT_FILE, 'utf8').trim();
-
   // Discover session ID
   const sessionId = args.session || discoverSessionId();
 
-  console.error(`[cgpt] Connecting to browser server...`);
-  const browser = await chromium.connect(wsEndpoint);
+  console.error(`[cgpt] Sending prompt (${prompt.length} chars)...`);
 
   try {
-    console.error(`[cgpt] Finding ChatGPT tab...`);
-    const page = await getOrCreateChatGPTPage(browser);
-
-    if (args.newChat) {
-      console.error(`[cgpt] Starting new chat...`);
-      await navigateToNewChat(page);
-    }
-
-    console.error(`[cgpt] Sending prompt (${prompt.length} chars)...`);
-    const response = await sendPromptAndWait(page, prompt, { timeout: args.timeout });
+    const response = await askServer(prompt, {
+      timeout: args.timeout,
+      newChat: args.newChat
+    });
 
     // Output response
     console.log(response);
@@ -173,9 +197,9 @@ async function main() {
       await notifyClaudeCodeRemote(sessionId, args.output);
     }
 
-  } finally {
-    // Don't close browser - leave it running for next request
-    // Just disconnect this client
+  } catch (e) {
+    console.error(`[cgpt] Error: ${e.message}`);
+    process.exit(1);
   }
 }
 

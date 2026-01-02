@@ -13,7 +13,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 
-const STORAGE_STATE_FILE = process.env.CGPT_STORAGE_STATE_FILE ||
+const STORAGE_STATE_FILE = process.env.ASK_QUESTION_STORAGE_STATE_FILE ||
   path.join(os.homedir(), '.chatgpt-relay/storage-state.json');
 
 const CHATGPT_URL = 'https://chatgpt.com';
@@ -22,8 +22,8 @@ async function main() {
   // Ensure storage directory exists
   fs.mkdirSync(path.dirname(STORAGE_STATE_FILE), { recursive: true });
 
-  console.log('[cgpt-login] Launching browser for login...');
-  console.log('[cgpt-login] Log into ChatGPT. Session will be saved automatically when login is detected.');
+  console.log('[ask-question-login] Launching browser for login...');
+  console.log('[ask-question-login] Log into ChatGPT. Session will be saved automatically when login is detected.');
 
   // Launch headed browser (will steal focus, but that's fine for login)
   const browser = await chromium.launch({
@@ -42,8 +42,8 @@ async function main() {
   // ChatGPT shows the composer even before login, so we check for:
   // 1. ABSENCE of login/signup buttons (present when logged out)
   // 2. PRESENCE of user menu button (only appears when logged in)
-  console.log('[cgpt-login] Waiting for login...');
-  console.log('[cgpt-login] (Log in, then wait for "Login detected!" message)');
+  console.log('[ask-question-login] Waiting for login...');
+  console.log('[ask-question-login] (Log in, then wait for "Login detected!" message)');
 
   // Selectors for logged-out state (these should NOT be visible when logged in)
   const loginButtonSelectors = [
@@ -86,7 +86,7 @@ async function main() {
 
     // Logged in if user menu is visible (definitive)
     if (userMenuVisible) {
-      console.log('[cgpt-login] Login detected! (user menu visible)');
+      console.log('[ask-question-login] Login detected! (user menu visible)');
       break;
     }
 
@@ -100,7 +100,7 @@ async function main() {
 
       if (!stillNoLoginButton) {
         // No login buttons for 3+ seconds - likely logged in
-        console.log('[cgpt-login] Login detected! (no login buttons)');
+        console.log('[ask-question-login] Login detected! (no login buttons)');
         break;
       }
     }
@@ -109,7 +109,7 @@ async function main() {
   }
 
   if (Date.now() - startTime >= maxWait) {
-    console.error('[cgpt-login] Timeout waiting for login. Please try again.');
+    console.error('[ask-question-login] Timeout waiting for login. Please try again.');
     await browser.close();
     process.exit(1);
   }
@@ -119,13 +119,13 @@ async function main() {
 
   // Save storage state
   await context.storageState({ path: STORAGE_STATE_FILE });
-  console.log(`[cgpt-login] Session saved to: ${STORAGE_STATE_FILE}`);
+  console.log(`[ask-question-login] Session saved to: ${STORAGE_STATE_FILE}`);
 
   await browser.close();
-  console.log('[cgpt-login] Done! You can now run cgpt-server (it will start headless).');
+  console.log('[ask-question-login] Done! You can now run ask-question-server (it will start headless).');
 }
 
 main().catch((e) => {
-  console.error('[cgpt-login] Error:', e.message);
+  console.error('[ask-question-login] Error:', e.message);
   process.exit(1);
 });

@@ -1,38 +1,33 @@
 #!/usr/bin/env node
 
 /**
- * ChatGPT Relay CLI
+ * ask-question CLI
  *
- * Sends prompts to the cgpt-server daemon via HTTP.
+ * Sends prompts to the ask-question-server daemon via HTTP.
  */
 
 import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { discoverSessionId } from './session.js';
 
-const SERVER_URL = process.env.CGPT_SERVER_URL || 'http://127.0.0.1:3033';
+const SERVER_URL = process.env.ASK_QUESTION_SERVER_URL || 'http://127.0.0.1:3033';
 
 function usage() {
-  console.log(`Usage: cgpt [options] [prompt...]
+  console.log(`Usage: ask-question [options] [prompt...]
 
 Send a prompt to ChatGPT and get the response.
 
 Options:
   -f, --file <path>     Read prompt from file
   -o, --output <path>   Write response to file
-  -s, --session <id>    Claude session ID (auto-detected if omitted)
   -t, --timeout <ms>    Response timeout (default: 120000)
   --new-chat            Start a new chat (don't reuse existing)
   -h, --help            Show this help
 
 Examples:
-  cgpt "What is the capital of France?"
-  cgpt What is the capital of France?
-  cgpt -f question.md -o answer.md
-  echo "Explain async/await" | cgpt
+  ask-question "What is the capital of France?"
+  ask-question -f question.md -o answer.md
+  echo "Explain async/await" | ask-question
 `);
   process.exit(0);
 }
@@ -43,7 +38,6 @@ function parseCLIArgs(args) {
     options: {
       file: { type: 'string', short: 'f' },
       output: { type: 'string', short: 'o' },
-      session: { type: 'string', short: 's' },
       timeout: { type: 'string', short: 't' },
       'new-chat': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -60,7 +54,6 @@ function parseCLIArgs(args) {
     prompt: positionals.join(' ') || null,
     file: values.file ?? null,
     output: values.output ?? null,
-    session: values.session ?? null,
     timeout: values.timeout ? parseInt(values.timeout, 10) : 120000,
     newChat: values['new-chat'] ?? false
   };
@@ -86,26 +79,6 @@ function pbcopy(text) {
       else reject(new Error(`pbcopy exited with ${code}`));
     });
   });
-}
-
-async function notifyClaudeCodeRemote(sessionId, answerFile) {
-  try {
-    const res = await fetch('http://localhost:3001/research-complete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: sessionId,
-        answer_file: answerFile,
-        source: 'chatgpt'
-      })
-    });
-
-    if (!res.ok) {
-      console.error(`[cgpt] Warning: Could not notify Claude-Code-Remote: HTTP ${res.status}`);
-    }
-  } catch (e) {
-    console.error(`[cgpt] Warning: Could not notify Claude-Code-Remote: ${e.message}`);
-  }
 }
 
 async function askServer(prompt, opts = {}) {
@@ -159,14 +132,11 @@ async function main() {
   const serverOk = await checkServerHealth();
   if (!serverOk) {
     console.error('Error: Server not running or not responding.');
-    console.error('Start it with: cgpt-server');
+    console.error('Start it with: ask-question-server');
     process.exit(1);
   }
 
-  // Discover session ID
-  const sessionId = args.session || discoverSessionId();
-
-  console.error(`[cgpt] Sending prompt (${prompt.length} chars)...`);
+  console.error(`[ask-question] Sending prompt (${prompt.length} chars)...`);
 
   try {
     const response = await askServer(prompt, {
@@ -180,30 +150,24 @@ async function main() {
     // Save to file if specified
     if (args.output) {
       fs.writeFileSync(args.output, response, 'utf8');
-      console.error(`[cgpt] Response saved to: ${args.output}`);
+      console.error(`[ask-question] Response saved to: ${args.output}`);
     }
 
     // Copy to clipboard
     try {
       await pbcopy(response);
-      console.error('[cgpt] Response copied to clipboard');
+      console.error('[ask-question] Response copied to clipboard');
     } catch (e) {
-      console.error(`[cgpt] Warning: Could not copy to clipboard: ${e.message}`);
-    }
-
-    // Notify Claude-Code-Remote if session available
-    if (sessionId) {
-      console.error(`[cgpt] Notifying Claude session: ${sessionId}`);
-      await notifyClaudeCodeRemote(sessionId, args.output);
+      console.error(`[ask-question] Warning: Could not copy to clipboard: ${e.message}`);
     }
 
   } catch (e) {
-    console.error(`[cgpt] Error: ${e.message}`);
+    console.error(`[ask-question] Error: ${e.message}`);
     process.exit(1);
   }
 }
 
 main().catch((e) => {
-  console.error(`[cgpt] Error: ${e.message}`);
+  console.error(`[ask-question] Error: ${e.message}`);
   process.exit(1);
 });

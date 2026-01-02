@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 /**
- * ChatGPT Relay Server
+ * ask-question-server
  *
  * HTTP daemon that owns a persistent browser context and serializes
- * requests to ChatGPT. CLI communicates via HTTP, not WebSocket connect.
+ * requests to ChatGPT. CLI communicates via HTTP.
  */
 
 import { chromium } from 'playwright';
@@ -14,10 +14,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { navigateToNewChat, sendPromptAndWait } from './chatgpt.js';
 
-const STORAGE_STATE_FILE = process.env.CGPT_STORAGE_STATE_FILE ||
+const STORAGE_STATE_FILE = process.env.ASK_QUESTION_STORAGE_STATE_FILE ||
   path.join(os.homedir(), '.chatgpt-relay/storage-state.json');
 
-const PORT = parseInt(process.env.CGPT_PORT || '3033', 10);
+const PORT = parseInt(process.env.ASK_QUESTION_PORT || '3033', 10);
 const SHUTDOWN_TIMEOUT_MS = 5000;
 
 let browser = null;
@@ -96,17 +96,17 @@ async function handleRequest(req, res) {
     }
 
     try {
-      console.log(`[cgpt-server] Processing prompt (${data.prompt.length} chars)...`);
+      console.log(`[ask-question-server] Processing prompt (${data.prompt.length} chars)...`);
       const response = await queueRequest(data.prompt, {
         timeout: data.timeout,
         newChat: data.newChat
       });
-      console.log(`[cgpt-server] Response received (${response.length} chars)`);
+      console.log(`[ask-question-server] Response received (${response.length} chars)`);
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, text: response }));
     } catch (e) {
-      console.error(`[cgpt-server] Error:`, e.message);
+      console.error(`[ask-question-server] Error:`, e.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: e.message }));
     }
@@ -118,16 +118,16 @@ async function handleRequest(req, res) {
 }
 
 async function main() {
-  // Check for storage state (session cookies from cgpt-login)
+  // Check for storage state (session cookies from ask-question-login)
   if (!fs.existsSync(STORAGE_STATE_FILE)) {
-    console.error('[cgpt-server] Error: No session found.');
-    console.error(`[cgpt-server] Run 'cgpt-login' first to log into ChatGPT.`);
-    console.error(`[cgpt-server] Expected: ${STORAGE_STATE_FILE}`);
+    console.error('[ask-question-server] Error: No session found.');
+    console.error(`[ask-question-server] Run 'ask-question-login' first to log into ChatGPT.`);
+    console.error(`[ask-question-server] Expected: ${STORAGE_STATE_FILE}`);
     process.exit(1);
   }
 
-  console.log('[cgpt-server] Starting headless browser...');
-  console.log(`[cgpt-server] Using session: ${STORAGE_STATE_FILE}`);
+  console.log('[ask-question-server] Starting headless browser...');
+  console.log(`[ask-question-server] Using session: ${STORAGE_STATE_FILE}`);
 
   // Launch headless browser with saved session state
   browser = await chromium.launch({
@@ -145,17 +145,17 @@ async function main() {
   // Open ChatGPT page
   page = await context.newPage();
   await page.goto('https://chatgpt.com');
-  console.log('[cgpt-server] ChatGPT page opened (headless).');
+  console.log('[ask-question-server] ChatGPT page opened (headless).');
 
   // Start HTTP server
   const server = http.createServer(handleRequest);
 
   server.listen(PORT, '127.0.0.1', () => {
-    console.log(`[cgpt-server] HTTP server listening on http://127.0.0.1:${PORT}`);
-    console.log('[cgpt-server] Endpoints:');
+    console.log(`[ask-question-server] HTTP server listening on http://127.0.0.1:${PORT}`);
+    console.log('[ask-question-server] Endpoints:');
     console.log('  POST /ask    - Send prompt, get response');
     console.log('  GET  /health - Health check');
-    console.log('[cgpt-server] Ready. Press Ctrl+C to stop.');
+    console.log('[ask-question-server] Ready. Press Ctrl+C to stop.');
   });
 
   // Shutdown handler
@@ -163,10 +163,10 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
 
-    console.log('\n[cgpt-server] Shutting down...');
+    console.log('\n[ask-question-server] Shutting down...');
 
     const hardTimeout = setTimeout(() => {
-      console.error('[cgpt-server] Force exiting after timeout');
+      console.error('[ask-question-server] Force exiting after timeout');
       process.exit(1);
     }, SHUTDOWN_TIMEOUT_MS);
 
@@ -184,16 +184,16 @@ async function main() {
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
   process.once('uncaughtException', (e) => {
-    console.error('[cgpt-server] Uncaught exception:', e);
+    console.error('[ask-question-server] Uncaught exception:', e);
     shutdown();
   });
   process.once('unhandledRejection', (e) => {
-    console.error('[cgpt-server] Unhandled rejection:', e);
+    console.error('[ask-question-server] Unhandled rejection:', e);
     shutdown();
   });
 }
 
 main().catch((e) => {
-  console.error('[cgpt-server] Error:', e);
+  console.error('[ask-question-server] Error:', e);
   process.exit(1);
 });

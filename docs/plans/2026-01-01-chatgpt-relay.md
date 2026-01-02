@@ -20,31 +20,26 @@
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| cgpt-login | ✅ Done | One-time headed login, saves storageState |
-| cgpt-server | ✅ Done | Headless daemon, HTTP API, request queue |
-| cgpt CLI | ✅ Done | HTTP client, clipboard, file I/O |
-| /ask-question integration | 🔲 Next | Auto-send to ChatGPT after drafting (cgpt-m2m) |
+| ask-question-login | ✅ Done | One-time headed login, saves storageState |
+| ask-question-server | ✅ Done | Headless daemon, HTTP API, request queue |
+| ask-question CLI | ✅ Done | HTTP client, clipboard, file I/O |
+| /ask-question integration | ✅ Done | Auto-send to ChatGPT after drafting |
 
 ---
 
-## Next Steps
+## Completed
 
-### Immediate: /ask-question Integration (cgpt-m2m)
-
-Update `~/Code/dotfiles/.claude/commands/ask-question.md` to:
-1. Draft question to file (existing)
-2. Invoke `cgpt -f question.md -o answer.md` (new, blocks ~30-120s)
-3. Read answer file and discuss (new)
+All core functionality is implemented. The `/ask-question` slash command now:
+1. Drafts question to file
+2. Invokes `ask-question -f question.md -o answer.md` (blocks ~30-360s)
+3. Reads answer file and discusses
 
 Optional `draft` argument skips automation for manual workflow.
-
-No notification endpoint needed - Claude runs cgpt synchronously and knows to read
-the answer file when it returns.
 
 ### Future: Async Research Mode
 
 For "fire and forget" research while multitasking:
-- Run cgpt in background
+- Run ask-question in background
 - Claude continues working on other tasks
 - Need notification mechanism to alert Claude when answer is ready
 - Could add `/research-complete` endpoint to Claude-Code-Remote (reverted commit
@@ -60,9 +55,9 @@ chatgpt-relay/
 │   ├── architecture.md
 │   └── plans/
 ├── src/
-│   ├── server.js      # HTTP daemon (headless browser)
-│   ├── login.js       # One-time login helper
-│   ├── cgpt.js        # CLI tool (HTTP client)
+│   ├── server.js      # ask-question-server daemon
+│   ├── login.js       # ask-question-login helper
+│   ├── cli.js         # ask-question CLI
 │   ├── chatgpt.js     # ChatGPT DOM automation
 │   ├── session.js     # Claude session discovery
 │   └── session.test.js

@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "bin": {
-    "cgpt": "./src/cgpt.js",
-    "cgpt-server": "./src/server.js",
-    "cgpt-login": "./src/login.js"
+    "ask-question": "./src/cli.js",
+    "ask-question-server": "./src/server.js",
+    "ask-question-login": "./src/login.js"
   },
   "scripts": {
     "server": "node src/server.js",

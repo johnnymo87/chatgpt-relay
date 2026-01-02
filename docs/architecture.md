@@ -30,7 +30,7 @@ Build a relay system that automates ChatGPT interaction via Playwright, allowing
 │  /tmp/stackexchange-*-question.md                                       │
 │      │                                                                  │
 │      ▼                                                                  │
-│  CLI (cgpt) ─────► HTTP POST /ask ─────► cgpt-server (daemon)           │
+│  CLI (ask-question) ─► HTTP POST /ask ─► ask-question-server (daemon)           │
 │                                               │                         │
 │                                               ▼                         │
 │                                         Chromium (headless)             │
@@ -62,7 +62,7 @@ Build a relay system that automates ChatGPT interaction via Playwright, allowing
 
 ## Components
 
-### 1. Login Helper (`cgpt-login`)
+### 1. Login Helper (`ask-question-login`)
 
 One-time interactive login flow:
 - Launches headed (visible) Chromium browser
@@ -71,7 +71,7 @@ One-time interactive login flow:
 - Saves session via Playwright `storageState` to `~/.chatgpt-relay/storage-state.json`
 - Only needed once; session persists across server restarts
 
-### 2. HTTP Daemon (`cgpt-server`)
+### 2. HTTP Daemon (`ask-question-server`)
 
 A long-lived Node process that:
 - Launches **headless** Chromium (no window, no focus-stealing)
@@ -88,7 +88,7 @@ A long-lived Node process that:
 - Request queue prevents race conditions
 - Server owns browser lifecycle completely
 
-### 3. CLI (`cgpt`)
+### 3. CLI (`ask-question`)
 
 The command-line tool that:
 - Sends prompts to daemon via `POST /ask`
@@ -108,7 +108,7 @@ Minor addition to existing webhook server:
 
 1. Claude Code runs `/ask-chatgpt bazel-query-performance`
 2. Command writes question to `/tmp/...question.md`
-3. Command invokes `cgpt --file ... --output ... --session $SESSION_ID`
+3. Command invokes `ask-question --file ... --output ...`
 4. CLI POSTs to `http://127.0.0.1:3033/ask`
 5. Server navigates to ChatGPT, injects prompt, waits for response
 6. Server returns response as JSON
@@ -128,8 +128,8 @@ Minor addition to existing webhook server:
 
 ### Headless with StorageState
 **Decision: Separate login from daemon**
-- `cgpt-login`: One-time headed browser for manual login, saves cookies
-- `cgpt-server`: Headless browser loads saved session
+- `ask-question-login`: One-time headed browser for manual login, saves cookies
+- `ask-question-server`: Headless browser loads saved session
 - Eliminates focus-stealing during normal operation
 - Session persists across server restarts
 
@@ -149,7 +149,7 @@ chatgpt-relay/
 ├── src/
 │   ├── server.js      # HTTP daemon (headless browser)
 │   ├── login.js       # One-time login helper (headed browser)
-│   ├── cgpt.js        # CLI tool (HTTP client)
+│   ├── cli.js         # CLI tool (HTTP client)
 │   ├── chatgpt.js     # ChatGPT DOM automation
 │   ├── session.js     # Claude session discovery
 │   └── session.test.js

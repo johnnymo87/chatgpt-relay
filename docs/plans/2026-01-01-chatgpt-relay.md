@@ -1,10 +1,16 @@
 # ChatGPT Relay Implementation Plan (Playwright)
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Status:** COMPLETED (2026-01-01)
+>
+> **Architecture Changed:** Original plan used `launchServer()` + WebSocket `connect()`.
+> Actual implementation uses HTTP daemon + `storageState` because `launchServer()`
+> doesn't support persistent sessions. See `docs/architecture.md` for current design.
 
 **Goal:** Build a CLI that sends research questions to ChatGPT via Playwright and notifies Claude Code when answers are ready.
 
-**Architecture:** Browser server daemon (`launchServer`) + CLI (`connect`) + ChatGPT DOM automation. No browser extension needed.
+**Architecture (Original):** ~~Browser server daemon (`launchServer`) + CLI (`connect`)~~
+
+**Architecture (Actual):** HTTP daemon (`chromium.launch` headless + `storageState`) + CLI (HTTP client) + one-time login helper
 
 **Tech Stack:** Node.js, Playwright
 

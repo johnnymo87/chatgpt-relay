@@ -14,12 +14,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { navigateToNewChat, sendPromptAndWait } from './chatgpt.js';
 
-const USER_DATA_DIR = process.env.CGPT_USER_DATA_DIR ||
-  path.join(os.homedir(), '.chatgpt-relay/user-data');
+const STORAGE_STATE_FILE = process.env.CGPT_STORAGE_STATE_FILE ||
+  path.join(os.homedir(), '.chatgpt-relay/storage-state.json');
 
 const PORT = parseInt(process.env.CGPT_PORT || '3033', 10);
 const SHUTDOWN_TIMEOUT_MS = 5000;
 
+let browser = null;
 let context = null;
 let page = null;
 let requestQueue = Promise.resolve();
@@ -117,28 +118,34 @@ async function handleRequest(req, res) {
 }
 
 async function main() {
-  // Ensure user data directory exists
-  fs.mkdirSync(USER_DATA_DIR, { recursive: true });
+  // Check for storage state (session cookies from cgpt-login)
+  if (!fs.existsSync(STORAGE_STATE_FILE)) {
+    console.error('[cgpt-server] Error: No session found.');
+    console.error(`[cgpt-server] Run 'cgpt-login' first to log into ChatGPT.`);
+    console.error(`[cgpt-server] Expected: ${STORAGE_STATE_FILE}`);
+    process.exit(1);
+  }
 
-  console.log('[cgpt-server] Starting browser with persistent profile...');
-  console.log(`[cgpt-server] User data: ${USER_DATA_DIR}`);
+  console.log('[cgpt-server] Starting headless browser...');
+  console.log(`[cgpt-server] Using session: ${STORAGE_STATE_FILE}`);
 
-  // Launch persistent context (supports user data dir for login persistence)
-  context = await chromium.launchPersistentContext(USER_DATA_DIR, {
-    headless: false,
+  // Launch headless browser with saved session state
+  browser = await chromium.launch({
+    headless: true,
     args: [
-      '--disable-blink-features=AutomationControlled',
-      '--disable-session-crashed-bubble',
-      '--hide-crash-restore-bubble',
-      '--disable-infobars',
-      '--noerrdialogs'
+      '--disable-blink-features=AutomationControlled'
     ]
   });
 
+  // Create context with saved cookies/localStorage
+  context = await browser.newContext({
+    storageState: STORAGE_STATE_FILE
+  });
+
   // Open ChatGPT page
-  page = context.pages()[0] || await context.newPage();
+  page = await context.newPage();
   await page.goto('https://chatgpt.com');
-  console.log('[cgpt-server] ChatGPT page opened. Log in if needed.');
+  console.log('[cgpt-server] ChatGPT page opened (headless).');
 
   // Start HTTP server
   const server = http.createServer(handleRequest);
@@ -165,8 +172,8 @@ async function main() {
 
     try {
       server.close();
-      if (context) {
-        await context.close();
+      if (browser) {
+        await browser.close();
       }
       process.exitCode = 0;
     } finally {

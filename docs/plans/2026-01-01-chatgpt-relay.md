@@ -23,7 +23,6 @@
 | cgpt-login | ✅ Done | One-time headed login, saves storageState |
 | cgpt-server | ✅ Done | Headless daemon, HTTP API, request queue |
 | cgpt CLI | ✅ Done | HTTP client, clipboard, file I/O |
-| /research-complete | ✅ Done | Claude-Code-Remote endpoint for notifications |
 | /ask-question integration | 🔲 Next | Auto-send to ChatGPT after drafting (cgpt-m2m) |
 
 ---
@@ -34,20 +33,22 @@
 
 Update `~/Code/dotfiles/.claude/commands/ask-question.md` to:
 1. Draft question to file (existing)
-2. Invoke `cgpt -f question.md -o answer.md` (new)
+2. Invoke `cgpt -f question.md -o answer.md` (new, blocks ~30-120s)
 3. Read answer file and discuss (new)
 
 Optional `draft` argument skips automation for manual workflow.
 
+No notification endpoint needed - Claude runs cgpt synchronously and knows to read
+the answer file when it returns.
+
 ### Future: Async Research Mode
 
-Currently cgpt runs synchronously (~30-120s blocking). Alternative architecture:
+For "fire and forget" research while multitasking:
 - Run cgpt in background
 - Claude continues working on other tasks
-- `/research-complete` injects "Please read X and let's discuss it"
-- Claude picks up the answer when ready
-
-This enables "fire and forget" research while multitasking.
+- Need notification mechanism to alert Claude when answer is ready
+- Could add `/research-complete` endpoint to Claude-Code-Remote (reverted commit
+  2943420 has the implementation if needed)
 
 ---
 

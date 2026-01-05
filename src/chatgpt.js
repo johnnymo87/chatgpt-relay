@@ -5,6 +5,38 @@
 
 const CHATGPT_URL = 'https://chatgpt.com';
 
+/**
+ * Check if a response is a ChatGPT streaming/conversation response.
+ * @param {import('playwright').Response} resp
+ * @returns {boolean}
+ */
+function isChatGPTStreamResponse(resp) {
+  const url = resp.url();
+  const req = resp.request();
+  return (
+    req.method() === 'POST' &&
+    (url.includes('/backend-api/conversation') ||
+     url.includes('/backend-anon/conversation') ||
+     url.includes('/backend-api/sentinel/chat-requirements'))
+  );
+}
+
+/**
+ * Convert Chromium network error codes to friendly messages.
+ * @param {string|undefined} errorText - e.g., 'net::ERR_INTERNET_DISCONNECTED'
+ * @returns {string}
+ */
+function friendlyNetError(errorText) {
+  const t = String(errorText || '');
+  if (t.includes('ERR_INTERNET_DISCONNECTED')) return 'Network disconnected';
+  if (t.includes('ERR_NETWORK_CHANGED')) return 'Network changed (interface switch / reconnect)';
+  if (t.includes('ERR_NAME_NOT_RESOLVED')) return 'DNS failure (no internet or DNS misconfigured)';
+  if (t.includes('ERR_CONNECTION_TIMED_OUT')) return 'Network timeout';
+  if (t.includes('ERR_CONNECTION_REFUSED')) return 'Connection refused';
+  if (t.includes('ERR_CONNECTION_RESET')) return 'Connection reset';
+  return `Network error: ${t || 'unknown'}`;
+}
+
 // Selectors - grouped for easy maintenance when ChatGPT UI changes
 // Note: contenteditable is prioritized because ChatGPT uses a hidden fallback textarea
 const SELECTORS = {
@@ -104,6 +136,11 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
   const assistantMsgs = page.locator(SELECTORS.assistantMessage);
   const beforeCount = await assistantMsgs.count();
 
+  // Start listening for the streaming response BEFORE clicking send
+  // This ensures we don't miss it due to race conditions
+  const streamResponsePromise = page.waitForResponse(isChatGPTStreamResponse, { timeout: 30000 })
+    .catch(() => null); // Don't fail if no matching response (fallback to DOM-only)
+
   // Wait for send button to be enabled, then click
   const sendBtn = page.locator(SELECTORS.sendButton).first();
 
@@ -128,8 +165,8 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
     await composer.press('Enter');
   }
 
-  // Wait for response to complete
-  const response = await waitForResponse(page, beforeCount, timeout);
+  // Wait for response to complete, with network failure detection
+  const response = await waitForResponse(page, beforeCount, timeout, streamResponsePromise);
   return response;
 }
 
@@ -140,26 +177,65 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
  * @param {import('playwright').Page} page
  * @param {number} beforeCount - Number of assistant messages before sending
  * @param {number} timeout - Max wait time in ms
+ * @param {Promise<import('playwright').Response|null>} streamResponsePromise - Promise for the streaming response
  * @returns {Promise<string>}
  */
-async function waitForResponse(page, beforeCount, timeout) {
+async function waitForResponse(page, beforeCount, timeout, streamResponsePromise) {
   const stopBtn = page.locator(SELECTORS.stopButton);
+
+  // Get the stream response (may be null if not captured)
+  const streamResponse = await streamResponsePromise;
+  let networkErrorPromise = null;
+
+  if (streamResponse) {
+    console.log('[chatgpt] Tracking stream response for network failures');
+    // response.finished() returns null on success, Error on failure
+    networkErrorPromise = streamResponse.finished().then((maybeErr) => {
+      if (maybeErr instanceof Error) {
+        throw new Error(`Network failure: ${friendlyNetError(maybeErr.message)}`);
+      }
+      // Success - return a sentinel that won't affect the race
+      return { __networkOk: true };
+    });
+  }
 
   // Step 1: Wait for stop button to APPEAR (generation started)
   console.log('[chatgpt] Waiting for generation to start...');
   try {
-    await stopBtn.waitFor({ state: 'visible', timeout: 30000 });
+    const startWait = stopBtn.waitFor({ state: 'visible', timeout: 30000 });
+    if (networkErrorPromise) {
+      // Race against network errors
+      const result = await Promise.race([startWait, networkErrorPromise]);
+      if (result?.__networkOk) {
+        // Network finished before stop button - wait for stop button anyway
+        await startWait.catch(() => {});
+      }
+    } else {
+      await startWait;
+    }
     console.log('[chatgpt] Generation started (stop button visible)');
-  } catch {
+  } catch (e) {
+    if (e.message.includes('Network failure')) throw e;
     // Stop button might not appear for very fast responses, continue anyway
     console.log('[chatgpt] Stop button not seen, continuing...');
   }
 
   // Step 2: Wait for stop button to DISAPPEAR (generation ended)
   console.log('[chatgpt] Waiting for generation to complete...');
-  await stopBtn.waitFor({ state: 'hidden', timeout }).catch(() => {
+  try {
+    const completeWait = stopBtn.waitFor({ state: 'hidden', timeout });
+    if (networkErrorPromise) {
+      const result = await Promise.race([completeWait, networkErrorPromise]);
+      if (result?.__networkOk) {
+        await completeWait.catch(() => {});
+      }
+    } else {
+      await completeWait;
+    }
+  } catch (e) {
+    if (e.message.includes('Network failure')) throw e;
     console.log('[chatgpt] Stop button wait timed out');
-  });
+  }
   console.log('[chatgpt] Generation complete');
 
   // Step 3: Get the last assistant message
@@ -193,7 +269,15 @@ async function waitForResponse(page, beforeCount, timeout) {
       continue;
     }
 
-    const currentText = (await lastAssistant.innerText().catch(() => '')).trim();
+    const currentText = (await lastAssistant.innerText().catch((e) => {
+      console.log(`[chatgpt] innerText error: ${e.message}`);
+      return '';
+    })).trim();
+    if (!currentText && stableMs === 0) {
+      // Log once when we first see empty text
+      const count = await page.locator(SELECTORS.assistantMessage).count();
+      console.log(`[chatgpt] Empty text, assistant message count: ${count}`);
+    }
 
     if (currentText && currentText === lastText) {
       stableMs += 250;

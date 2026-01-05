@@ -42,8 +42,25 @@ async function processRequest(prompt, opts = {}) {
     await navigateToNewChat(page);
   }
 
-  const response = await sendPromptAndWait(page, prompt, { timeout });
-  return response;
+  try {
+    const response = await sendPromptAndWait(page, prompt, { timeout });
+    return response;
+  } catch (e) {
+    // Hard reset: close page to prevent cascading failures
+    // Reload is not aggressive enough - ChatGPT's SPA can have stuck state
+    // (websockets, React state, focus traps) that survives a reload
+    console.log('[ask-question-server] Error occurred, closing page to reset state...');
+    try {
+      if (page && !page.isClosed()) {
+        await page.close();
+      }
+    } catch (closeErr) {
+      console.error('[ask-question-server] Failed to close page:', closeErr.message);
+    }
+    page = null; // Will be recreated on next request
+    console.log('[ask-question-server] Page closed, will recreate on next request');
+    throw e;
+  }
 }
 
 /**

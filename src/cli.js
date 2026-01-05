@@ -82,22 +82,43 @@ function pbcopy(text) {
 }
 
 async function askServer(prompt, opts = {}) {
-  const { timeout = 600000, newChat = false } = opts;
+  const { timeout = 600000, newChat = false, maxRetries = 2 } = opts;
 
-  const res = await fetch(`${SERVER_URL}/ask`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, timeout, newChat }),
-    signal: AbortSignal.timeout(timeout + 10000) // Extra buffer for HTTP overhead
-  });
+  let lastError;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(`${SERVER_URL}/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, timeout, newChat }),
+        signal: AbortSignal.timeout(timeout + 10000) // Extra buffer for HTTP overhead
+      });
 
-  const data = await res.json();
+      const data = await res.json();
 
-  if (!data.ok) {
-    throw new Error(data.error || 'Unknown server error');
+      if (!data.ok) {
+        throw new Error(data.error || 'Unknown server error');
+      }
+
+      return data.text;
+    } catch (e) {
+      lastError = e;
+      // Only retry on connection-level failures, not server errors
+      const isConnectionError = e.message.includes('fetch failed') ||
+                                e.message.includes('ECONNREFUSED') ||
+                                e.message.includes('ECONNRESET') ||
+                                e.cause?.code === 'ECONNREFUSED';
+
+      if (isConnectionError && attempt < maxRetries) {
+        const delayMs = attempt * 1000; // 1s, 2s, ...
+        console.error(`[ask-question] Connection failed, retrying in ${delayMs}ms (attempt ${attempt}/${maxRetries})...`);
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+      throw e;
+    }
   }
-
-  return data.text;
+  throw lastError;
 }
 
 async function checkServerHealth() {

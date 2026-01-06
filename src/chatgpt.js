@@ -114,11 +114,11 @@ export async function navigateToNewChat(page) {
  * @param {import('playwright').Page} page
  * @param {string} prompt
  * @param {object} opts
- * @param {number} opts.timeout - Max wait time in ms (default: 600000)
+ * @param {number} opts.timeout - Max wait time in ms (default: 1200000)
  * @returns {Promise<string>} The assistant's response text
  */
 export async function sendPromptAndWait(page, prompt, opts = {}) {
-  const timeout = opts.timeout ?? 600000;
+  const timeout = opts.timeout ?? 1200000;
 
   // Check login state before attempting to fill composer
   await assertLoggedIn(page);

@@ -30,7 +30,7 @@ let shuttingDown = false;
  * Process a prompt request (serialized via queue).
  */
 async function processRequest(prompt, opts = {}) {
-  const { timeout = 600000, newChat = false } = opts;
+  const { timeout = 1200000, newChat = false } = opts;
 
   // Ensure we have a page
   if (!page || page.isClosed()) {
@@ -180,6 +180,11 @@ async function main() {
 
   // Start HTTP server
   const server = http.createServer(handleRequest);
+
+  // Extend timeouts for long-running ChatGPT requests (can take 20+ minutes)
+  server.timeout = 0; // Disable socket timeout (default is 0, but be explicit)
+  server.keepAliveTimeout = 1260000; // 21 minutes - longer than max request timeout
+  server.headersTimeout = 1290000; // Must be > keepAliveTimeout
 
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`[ask-question-server] HTTP server listening on http://127.0.0.1:${PORT}`);

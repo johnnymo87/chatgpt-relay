@@ -7,6 +7,7 @@
  */
 
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 
@@ -83,14 +84,16 @@ function pbcopy(text) {
 
 async function askServer(prompt, opts = {}) {
   const { timeout = 1200000, newChat = false, maxRetries = 2 } = opts;
+  const requestId = crypto.randomBytes(4).toString('hex');
 
   let lastError;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
+      console.error(`[ask-question] [${requestId}] Attempt ${attempt}/${maxRetries}...`);
       const res = await fetch(`${SERVER_URL}/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, timeout, newChat }),
+        body: JSON.stringify({ prompt, timeout, newChat, requestId }),
         signal: AbortSignal.timeout(timeout + 10000) // Extra buffer for HTTP overhead
       });
 
@@ -100,6 +103,7 @@ async function askServer(prompt, opts = {}) {
         throw new Error(data.error || 'Unknown server error');
       }
 
+      console.error(`[ask-question] [${requestId}] Success`);
       return data.text;
     } catch (e) {
       lastError = e;
@@ -111,7 +115,7 @@ async function askServer(prompt, opts = {}) {
 
       if (isConnectionError && attempt < maxRetries) {
         const delayMs = attempt * 1000; // 1s, 2s, ...
-        console.error(`[ask-question] Connection failed, retrying in ${delayMs}ms (attempt ${attempt}/${maxRetries})...`);
+        console.error(`[ask-question] [${requestId}] Connection failed (${e.message}), retrying in ${delayMs}ms...`);
         await new Promise(r => setTimeout(r, delayMs));
         continue;
       }
@@ -157,7 +161,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.error(`[ask-question] Sending prompt (${prompt.length} chars)...`);
+  console.error(`[ask-question] Sending prompt (${prompt.length} chars)`);
 
   try {
     const response = await askServer(prompt, {

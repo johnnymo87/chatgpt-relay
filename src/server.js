@@ -30,18 +30,22 @@ let shuttingDown = false;
  * Process a prompt request (serialized via queue).
  */
 async function processRequest(prompt, opts = {}) {
-  const { timeout = 1200000, newChat = false } = opts;
+  const { timeout = 1200000, newChat = false, requestId = '?' } = opts;
+  const log = (msg) => console.log(`[ask-question-server] [${requestId}] ${msg}`);
 
   // Ensure we have a page
   if (!page || page.isClosed()) {
+    log('Creating new page...');
     page = await context.newPage();
     await page.goto('https://chatgpt.com');
   }
 
   if (newChat) {
+    log('Navigating to new chat...');
     await navigateToNewChat(page);
   }
 
+  log('Processing...');
   try {
     const response = await sendPromptAndWait(page, prompt, { timeout });
     return response;
@@ -49,16 +53,16 @@ async function processRequest(prompt, opts = {}) {
     // Hard reset: close page to prevent cascading failures
     // Reload is not aggressive enough - ChatGPT's SPA can have stuck state
     // (websockets, React state, focus traps) that survives a reload
-    console.log('[ask-question-server] Error occurred, closing page to reset state...');
+    log(`Error: ${e.message}, closing page to reset state...`);
     try {
       if (page && !page.isClosed()) {
         await page.close();
       }
     } catch (closeErr) {
-      console.error('[ask-question-server] Failed to close page:', closeErr.message);
+      log(`Failed to close page: ${closeErr.message}`);
     }
     page = null; // Will be recreated on next request
-    console.log('[ask-question-server] Page closed, will recreate on next request');
+    log('Page closed, will recreate on next request');
     throw e;
   }
 }
@@ -112,18 +116,20 @@ async function handleRequest(req, res) {
       return;
     }
 
+    const reqId = data.requestId || 'unknown';
     try {
-      console.log(`[ask-question-server] Processing prompt (${data.prompt.length} chars)...`);
+      console.log(`[ask-question-server] [${reqId}] Received (${data.prompt.length} chars)`);
       const response = await queueRequest(data.prompt, {
         timeout: data.timeout,
-        newChat: data.newChat
+        newChat: data.newChat,
+        requestId: reqId
       });
-      console.log(`[ask-question-server] Response received (${response.length} chars)`);
+      console.log(`[ask-question-server] [${reqId}] Sending response (${response.length} chars)`);
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, text: response }));
     } catch (e) {
-      console.error(`[ask-question-server] Error:`, e.message);
+      console.error(`[ask-question-server] [${reqId}] Error: ${e.message}`);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: e.message }));
     }

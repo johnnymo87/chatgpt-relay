@@ -78,8 +78,8 @@ echo "Explain async/await in JavaScript" | ask-question
 |--------|-------------|
 | `-f, --file <path>` | Read prompt from file |
 | `-o, --output <path>` | Write response to file |
-| `-t, --timeout <ms>` | Response timeout (default: 120000) |
-| `--new-chat` | Start fresh chat (don't reuse existing) |
+| `-t, --timeout <ms>` | Response timeout (default: 1200000 / 20 min) |
+| `--continue` | Continue existing chat (default: start new chat) |
 | `-h, --help` | Show help |
 
 ## Integration with /ask-question Slash Command
@@ -88,7 +88,7 @@ The `/ask-question` slash command in Claude Code uses this CLI:
 
 1. Claude drafts a Stack Exchange-formatted question
 2. Claude invokes: `ask-question -f question.md -o answer.md`
-3. CLI blocks while ChatGPT responds (~30-360s)
+3. CLI blocks while ChatGPT responds (typically 1-10 minutes)
 4. Claude reads the answer file and discusses
 
 Use `/ask-question draft topic` to skip automation and just draft the question.
@@ -118,9 +118,13 @@ ask-question-login
 
 ### Response timeout
 
-Increase timeout for long responses:
+Default is 20 minutes. Adjust if needed:
 ```bash
-ask-question -t 300000 "Write a detailed essay..."
+# Shorter timeout for quick questions
+ask-question -t 120000 "What is 2+2?"
+
+# Longer timeout for complex responses
+ask-question -t 1800000 "Write a comprehensive analysis..."
 ```
 
 ## Environment Variables

@@ -21,7 +21,7 @@ Options:
   -f, --file <path>     Read prompt from file
   -o, --output <path>   Write response to file
   -t, --timeout <ms>    Response timeout (default: 1200000 / 20 min)
-  --new-chat            Start a new chat (don't reuse existing)
+  --continue            Continue existing chat (default: start new chat)
   -h, --help            Show this help
 
 Examples:
@@ -39,7 +39,7 @@ function parseCLIArgs(args) {
       file: { type: 'string', short: 'f' },
       output: { type: 'string', short: 'o' },
       timeout: { type: 'string', short: 't' },
-      'new-chat': { type: 'boolean' },
+      continue: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
@@ -55,7 +55,7 @@ function parseCLIArgs(args) {
     file: values.file ?? null,
     output: values.output ?? null,
     timeout: values.timeout ? parseInt(values.timeout, 10) : 1200000,
-    newChat: values['new-chat'] ?? false
+    newChat: !values.continue
   };
 }
 

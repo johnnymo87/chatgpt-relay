@@ -10,8 +10,18 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
+import { Agent } from 'undici';
 
 const SERVER_URL = process.env.ASK_QUESTION_SERVER_URL || 'http://127.0.0.1:3033';
+
+// Custom dispatcher to disable Undici's hidden timeouts.
+// Node's fetch() uses Undici which defaults headersTimeout and bodyTimeout to
+// 300s (5 min). For long-running requests (4-10+ min), this causes "fetch failed"
+// errors even though our AbortSignal.timeout is much longer.
+const longRequestDispatcher = new Agent({
+  headersTimeout: 0, // Disable Undici's 5-min header timeout
+  bodyTimeout: 0,    // Disable Undici's body inactivity timeout
+});
 
 function usage() {
   console.log(`Usage: ask-question [options] [prompt...]
@@ -94,7 +104,8 @@ async function askServer(prompt, opts = {}) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt, timeout, newChat, requestId }),
-        signal: AbortSignal.timeout(timeout + 10000) // Extra buffer for HTTP overhead
+        signal: AbortSignal.timeout(timeout + 10000), // Extra buffer for HTTP overhead
+        dispatcher: longRequestDispatcher, // Disable Undici's 5-min hidden timeouts
       });
 
       const data = await res.json();

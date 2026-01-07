@@ -107,15 +107,28 @@ async function askServer(prompt, opts = {}) {
       return data.text;
     } catch (e) {
       lastError = e;
+
+      // Log detailed error info to diagnose connection failures
+      // Key insight: Node's fetch() uses Undici which has hidden timeouts
+      // (headersTimeout/bodyTimeout default to 5 min). If cause.code is
+      // UND_ERR_HEADERS_TIMEOUT, that's the culprit.
+      console.error(`[ask-question] [${requestId}] Error: ${e.message}`);
+      if (e.cause) {
+        console.error(`[ask-question] [${requestId}] Cause: ${e.cause.message || e.cause}`);
+        console.error(`[ask-question] [${requestId}] Cause code: ${e.cause.code || 'none'}`);
+      }
+
       // Only retry on connection-level failures, not server errors
       const isConnectionError = e.message.includes('fetch failed') ||
                                 e.message.includes('ECONNREFUSED') ||
                                 e.message.includes('ECONNRESET') ||
-                                e.cause?.code === 'ECONNREFUSED';
+                                e.cause?.code === 'ECONNREFUSED' ||
+                                e.cause?.code === 'UND_ERR_HEADERS_TIMEOUT' ||
+                                e.cause?.code === 'UND_ERR_BODY_TIMEOUT';
 
       if (isConnectionError && attempt < maxRetries) {
         const delayMs = attempt * 1000; // 1s, 2s, ...
-        console.error(`[ask-question] [${requestId}] Connection failed (${e.message}), retrying in ${delayMs}ms...`);
+        console.error(`[ask-question] [${requestId}] Retrying in ${delayMs}ms...`);
         await new Promise(r => setTimeout(r, delayMs));
         continue;
       }

@@ -274,7 +274,7 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
       return '';
     })).trim();
     if (!currentText && stableMs === 0) {
-      // Log once when we first see empty text
+      // Log once when we first see empty text (usually transient during generation)
       const count = await page.locator(SELECTORS.assistantMessage).count();
       console.log(`[chatgpt] Empty text, assistant message count: ${count}`);
     }

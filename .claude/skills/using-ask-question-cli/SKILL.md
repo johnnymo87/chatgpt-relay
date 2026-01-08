@@ -48,7 +48,8 @@ Keep this running in a dedicated terminal or tmux pane. It runs headless (no vis
 ```
 [ask-question-server] Starting headless browser...
 [ask-question-server] Using session: ~/.chatgpt-relay/storage-state.json
-[ask-question-server] ChatGPT page opened (headless).
+[ask-question-server] ChatGPT page opened.
+[ask-question-server] Login verified.
 [ask-question-server] HTTP server listening on http://127.0.0.1:3033
 ```
 
@@ -126,6 +127,33 @@ ask-question -t 120000 "What is 2+2?"
 # Longer timeout for complex responses
 ask-question -t 1800000 "Write a comprehensive analysis..."
 ```
+
+## Debugging
+
+### Request ID Tracing
+
+Each request gets a unique ID (e.g., `[a1b2c3d4]`) logged on both CLI and server sides:
+
+```
+[ask-question] [a1b2c3d4] Attempt 1/2...
+[ask-question-server] [a1b2c3d4] Received (500 chars)
+[ask-question-server] [a1b2c3d4] Processing...
+[ask-question-server] [a1b2c3d4] Sending response (1200 chars)
+[ask-question] [a1b2c3d4] Success
+```
+
+Use this to correlate CLI errors with server logs.
+
+### Connection Failures
+
+The CLI automatically retries once on connection errors (fetch failed, ECONNREFUSED, etc.). If you see:
+```
+[ask-question] [a1b2c3d4] Error: fetch failed
+[ask-question] [a1b2c3d4] Cause: ...
+[ask-question] [a1b2c3d4] Cause code: UND_ERR_HEADERS_TIMEOUT
+```
+
+This indicates Undici's internal timeout fired. The CLI will retry automatically.
 
 ## Environment Variables
 

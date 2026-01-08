@@ -202,10 +202,30 @@ chatgpt-relay/
 - **DOM fragility** - ChatGPT UI changes will break selectors (accepted)
 - **Single request at a time** - Queue serializes prompts
 
+## Reliability Features
+
+### Request ID Tracing
+Each request gets a unique 8-character ID logged on both CLI and server sides, making it easy to correlate errors across the system.
+
+### Automatic Retry
+CLI retries once on connection-level failures (ECONNREFUSED, ECONNRESET, Undici timeouts).
+
+### Undici Timeout Fix
+Node's `fetch()` uses Undici with hidden 5-minute timeouts. We configure a custom dispatcher with `headersTimeout: 0` and `bodyTimeout: 0` to allow 20+ minute requests.
+
+### Network Failure Detection
+Tracks ChatGPT's streaming response via `response.finished()` to detect network disconnections mid-request, rather than waiting for the full timeout.
+
+### Hard Reset on Errors
+When errors occur, the page is closed and recreated (not just reloaded) to prevent cascading failures from stuck UI state.
+
+### Login Verification
+Server verifies login state at startup and fails fast with a clear error if the session has expired.
+
 ## Future Enhancements
 
 - Support for other research tools (Perplexity, Claude.ai web)
 - Response streaming (show progress)
-- Conversation threading (continue existing chat)
 - Request cancellation via watchdog
 - Modal/interstitial dismissal helpers
+- Server-side heartbeat bytes for extra reliability

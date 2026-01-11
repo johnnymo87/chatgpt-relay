@@ -173,6 +173,79 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
 }
 
 /**
+ * Safely read clipboard text, returning empty string on failure.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<string>}
+ */
+async function readClipboardText(page) {
+  return await page.evaluate(async () => {
+    try {
+      return await navigator.clipboard.readText();
+    } catch {
+      return '';
+    }
+  });
+}
+
+/**
+ * Extract response text via copy button (preferred) or innerText (fallback).
+ * Copy button preserves markdown formatting.
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} messageLocator - The assistant message locator
+ * @returns {Promise<string>}
+ */
+async function extractResponseText(page, messageLocator) {
+  // Try clipboard extraction (best effort)
+  try {
+    // Hover to reveal action buttons (ChatGPT hides them until hover)
+    await messageLocator.hover({ timeout: 2000 }).catch(() => {});
+
+    // Scope copy button to this message container (not global .last())
+    const copyBtn = messageLocator.locator(SELECTORS.copyTurnButton);
+
+    // Use waitFor, not isVisible(timeout) - timeout is ignored in isVisible
+    await copyBtn.waitFor({ state: 'visible', timeout: 1500 });
+
+    // Ensure document focus (helps with Clipboard API in some cases)
+    await page.click('body', { position: { x: 5, y: 5 }, timeout: 1000 }).catch(() => {});
+
+    // Snapshot clipboard before click
+    const before = await readClipboardText(page);
+
+    await copyBtn.click({ timeout: 1500 });
+
+    // Poll until clipboard changes (more robust than fixed wait)
+    const handle = await page.waitForFunction(
+      async (prev) => {
+        try {
+          const text = await navigator.clipboard.readText();
+          if (!text || !text.trim()) return null;
+          if (prev && text === prev) return null;
+          return text;
+        } catch {
+          return null;
+        }
+      },
+      before,
+      { timeout: 2000 }
+    );
+
+    const copied = await handle.jsonValue();
+    if (copied && copied.trim()) {
+      console.log(`[chatgpt] Extracted via copy button (${copied.length} chars)`);
+      return copied.trim();
+    }
+  } catch (e) {
+    console.log(`[chatgpt] Copy button extraction failed: ${e.message}, falling back to innerText`);
+  }
+
+  // Fallback to innerText
+  const text = await messageLocator.innerText();
+  console.log(`[chatgpt] Extracted via innerText (${text.length} chars)`);
+  return text.trim();
+}
+
+/**
  * Wait for the assistant's response to complete.
  * Uses stop button lifecycle: visible (generating) -> hidden (done)
  * This is more reliable than counting DOM nodes for React SPAs.
@@ -285,7 +358,7 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
       stableMs += 250;
       if (stableMs >= stabilityThreshold) {
         console.log(`[chatgpt] Response stabilized (${currentText.length} chars)`);
-        return currentText;
+        return await extractResponseText(page, lastAssistant);
       }
     } else {
       stableMs = 0;
@@ -296,7 +369,7 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
   }
 
   // Timeout - return whatever we have
-  const finalText = (await lastAssistant.innerText().catch(() => '')).trim();
+  const finalText = await extractResponseText(page, lastAssistant).catch(() => '');
   if (finalText) {
     console.log(`[chatgpt] Timeout but have partial response (${finalText.length} chars)`);
     return finalText;

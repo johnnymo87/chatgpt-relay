@@ -197,11 +197,12 @@ async function readClipboardText(page) {
 async function extractResponseText(page, messageLocator) {
   // Try clipboard extraction (best effort)
   try {
-    // Hover to reveal action buttons (ChatGPT hides them until hover)
-    await messageLocator.hover({ timeout: 2000 }).catch(() => {});
+    // Navigate up to the turn container (article) that holds both message and action buttons
+    const turnContainer = messageLocator.locator('xpath=ancestor::article[@data-testid]');
+    const copyBtn = turnContainer.locator(SELECTORS.copyTurnButton);
 
-    // Scope copy button to this message container (not global .last())
-    const copyBtn = messageLocator.locator(SELECTORS.copyTurnButton);
+    // Hover the turn container to reveal action buttons (they have pointer-events:none until hover)
+    await turnContainer.hover({ timeout: 2000 }).catch(() => {});
 
     // Use waitFor, not isVisible(timeout) - timeout is ignored in isVisible
     await copyBtn.waitFor({ state: 'visible', timeout: 1500 });
@@ -212,7 +213,8 @@ async function extractResponseText(page, messageLocator) {
     // Snapshot clipboard before click
     const before = await readClipboardText(page);
 
-    await copyBtn.click({ timeout: 1500 });
+    // Use force:true to bypass pointer-events:none overlay on action bar
+    await copyBtn.click({ timeout: 1500, force: true });
 
     // Poll until clipboard changes (more robust than fixed wait)
     const handle = await page.waitForFunction(

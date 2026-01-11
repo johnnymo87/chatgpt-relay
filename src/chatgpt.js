@@ -198,7 +198,17 @@ async function extractResponseText(page, messageLocator) {
   // Try clipboard extraction (best effort)
   try {
     // Navigate up to the turn container (article) that holds both message and action buttons
+    // ChatGPT DOM: article[data-testid] > div > div[data-message-author-role] (message)
+    //                                       > div (action bar with copy button)
     const turnContainer = messageLocator.locator('xpath=ancestor::article[@data-testid]');
+
+    // Check if turn container was found (DOM structure may have changed)
+    if (await turnContainer.count() === 0) {
+      console.log('[chatgpt] Turn container not found (DOM may have changed), using innerText');
+      const text = await messageLocator.innerText();
+      return text.trim();
+    }
+
     const copyBtn = turnContainer.locator(SELECTORS.copyTurnButton);
 
     // Hover the turn container to reveal action buttons (they have pointer-events:none until hover)

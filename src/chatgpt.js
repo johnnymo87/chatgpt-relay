@@ -71,6 +71,8 @@ const SELECTORS = {
     '[data-testid="continue-button"]'
   ].join(', '),
 
+  copyTurnButton: '[data-testid="copy-turn-action-button"]',
+
   loginButton: [
     'button:has-text("Log in")',
     'button:has-text("Sign in")',

@@ -166,7 +166,8 @@ async function main() {
 
   // Create context with saved cookies/localStorage
   context = await browser.newContext({
-    storageState: STORAGE_STATE_FILE
+    storageState: STORAGE_STATE_FILE,
+    permissions: ['clipboard-read', 'clipboard-write']
   });
 
   // Open ChatGPT page

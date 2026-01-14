@@ -3,3 +3,7 @@ node_modules/
 *.log
 .DS_Store
 user-data/
+
+# Devenv
+.devenv/
+.devenv.flake.nix

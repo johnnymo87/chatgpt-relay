@@ -2,6 +2,15 @@
 
 let
   pwBrowsers = pkgs.playwright-driver.browsers;
+
+  # Read the chromium revision from playwright-driver's browsers.json
+  browsersJson = builtins.fromJSON (builtins.readFile "${pkgs.playwright-driver}/browsers.json");
+  chromiumEntry = builtins.head (builtins.filter (b: b.name == "chromium") browsersJson.browsers);
+  chromiumRev = chromiumEntry.revision;
+
+  # Construct path to chromium executable
+  # On ARM64 Linux: chromium-XXXX/chrome-linux/chrome
+  chromiumExe = "${pwBrowsers}/chromium-${chromiumRev}/chrome-linux/chrome";
 in
 {
   languages.javascript = {
@@ -22,6 +31,9 @@ in
 
     # Skip host validation on NixOS
     PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
+
+    # Direct path to Nix-provided Chromium executable
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH = chromiumExe;
   };
 
   dotenv.enable = true;
@@ -29,5 +41,6 @@ in
   enterShell = ''
     echo "chatgpt-relay - Node $(node --version)"
     echo "Playwright browsers: $PLAYWRIGHT_BROWSERS_PATH"
+    echo "Chromium: $PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
   '';
 }

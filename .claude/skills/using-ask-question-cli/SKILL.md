@@ -171,3 +171,62 @@ This indicates Undici's internal timeout fired. The CLI will retry automatically
 | Path | Purpose |
 |------|---------|
 | `~/.chatgpt-relay/storage-state.json` | Saved ChatGPT session (cookies/localStorage) |
+
+## Architecture Deep Dive
+
+### Components
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Claude Code                                                            │
+│      │                                                                  │
+│      ▼                                                                  │
+│  /ask-question (slash command)                                          │
+│      │                                                                  │
+│      ▼                                                                  │
+│  CLI (ask-question) ─► HTTP POST /ask ─► ask-question-server (daemon)   │
+│                                               │                         │
+│                                               ▼                         │
+│                                         Chromium (headless)             │
+│                                         + storageState session          │
+│                                               │                         │
+│                                               ▼                         │
+│                                         ChatGPT tab                     │
+│                                         (DOM automation)                │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Design Decisions
+
+**HTTP Daemon over WebSocket Connect**
+- `launchServer()` doesn't support persistent sessions
+- HTTP is curl-debuggable and simpler
+- Request queue handles serialization naturally
+- Browser runs headless (no focus-stealing)
+
+**Headless with StorageState**
+- `ask-question-login`: One-time headed browser for manual login, saves cookies
+- `ask-question-server`: Headless browser loads saved session
+- Session persists across server restarts
+
+### Reliability Features
+
+| Feature | Description |
+|---------|-------------|
+| Request ID Tracing | 8-char ID correlates CLI and server logs |
+| Automatic Retry | CLI retries once on connection failures |
+| Network Failure Detection | Tracks streaming response via `response.finished()` |
+| Hard Reset on Errors | Closes and recreates page on failure |
+| Login Verification | Server verifies login state at startup |
+
+### Fragile Components (Maintenance Required)
+
+These rely on ChatGPT's DOM structure and may break when ChatGPT updates their UI:
+
+- Composer selectors (`div[contenteditable]`, `#prompt-textarea`)
+- Send button selectors (`button[data-testid="send-button"]`)
+- Message extraction (copy button, innerText fallback)
+- Login detection (chat history panel visibility)
+- Stop button lifecycle (generation progress)
+
+**Mitigation:** Multiple selector fallbacks, semantic selectors where possible, clear error messages.

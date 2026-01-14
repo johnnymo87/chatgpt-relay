@@ -25,9 +25,16 @@ async function main() {
   console.log('[ask-question-login] Launching browser for login...');
   console.log('[ask-question-login] Log into ChatGPT. Session will be saved automatically when login is detected.');
 
+  // Support Nix-provided Chromium via PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined;
+  if (executablePath) {
+    console.log(`[ask-question-login] Using Chromium: ${executablePath}`);
+  }
+
   // Launch headed browser (will steal focus, but that's fine for login)
   const browser = await chromium.launch({
     headless: false,
+    executablePath,
     args: [
       '--disable-blink-features=AutomationControlled'
     ]

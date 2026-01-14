@@ -152,10 +152,17 @@ async function main() {
   console.log('[ask-question-server] Starting headless browser...');
   console.log(`[ask-question-server] Using session: ${STORAGE_STATE_FILE}`);
 
+  // Support Nix-provided Chromium via PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined;
+  if (executablePath) {
+    console.log(`[ask-question-server] Using Chromium: ${executablePath}`);
+  }
+
   // Launch browser with anti-throttling flags
   // See: https://developer.chrome.com/docs/web-platform/page-lifecycle-api
   browser = await chromium.launch({
     headless: true,
+    executablePath,
     args: [
       '--disable-blink-features=AutomationControlled',
       '--disable-background-timer-throttling',

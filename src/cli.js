@@ -8,7 +8,6 @@
 
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { Agent } from 'undici';
 
@@ -80,17 +79,6 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8').trim();
 }
 
-function pbcopy(text) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('pbcopy');
-    proc.stdin.write(text);
-    proc.stdin.end();
-    proc.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`pbcopy exited with ${code}`));
-    });
-  });
-}
 
 async function askServer(prompt, opts = {}) {
   const { timeout = 1200000, newChat = false, maxRetries = 2 } = opts;
@@ -200,14 +188,6 @@ async function main() {
     if (args.output) {
       fs.writeFileSync(args.output, response, 'utf8');
       console.error(`[ask-question] Response saved to: ${args.output}`);
-    }
-
-    // Copy to clipboard
-    try {
-      await pbcopy(response);
-      console.error('[ask-question] Response copied to clipboard');
-    } catch (e) {
-      console.error(`[ask-question] Warning: Could not copy to clipboard: ${e.message}`);
     }
 
   } catch (e) {

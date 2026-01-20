@@ -10,6 +10,7 @@
   },
   "scripts": {
     "server": "node src/server.js",
+    "server:log": "mkdir -p ~/.local/state/chatgpt-relay && node src/server.js 2>&1 | tee ~/.local/state/chatgpt-relay/daemon.log",
     "test": "node --test src/*.test.js"
   },
   "dependencies": {

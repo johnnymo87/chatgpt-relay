@@ -40,12 +40,12 @@ ask-question-login  # Opens browser, log into ChatGPT
 
 ```bash
 cd ~/Code/chatgpt-relay
-node src/server.js 2>&1 | tee ~/.chatgpt-relay/daemon.log
+npm run server:log
 ```
 
 Keep this running in a dedicated terminal or tmux pane. It runs headless (no visible browser).
 
-**Why `tee` to a log file?** This allows Claude Code to check logs via `tail ~/.chatgpt-relay/daemon.log` even when the daemon runs in a separate terminal.
+**Why `tee` to a log file?** This allows Claude Code to check logs via `tail ~/.local/state/chatgpt-relay/daemon.log` even when the daemon runs in a separate terminal.
 
 **Expected output:**
 ```

@@ -6,9 +6,9 @@ CLI tool that sends prompts to ChatGPT via Playwright browser automation.
 
 ```bash
 npm install && npm link
-ask-question-login                                            # One-time: log into ChatGPT
-ask-question-server 2>&1 | tee ~/.chatgpt-relay/daemon.log    # Keep running
-ask-question "Hello?"                                         # From another terminal
+ask-question-login       # One-time: log into ChatGPT
+npm run server:log       # Keep running (logs to ~/.local/state/chatgpt-relay/daemon.log)
+ask-question "Hello?"    # From another terminal
 ```
 
 ## Commands

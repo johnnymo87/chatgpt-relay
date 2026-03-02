@@ -39,19 +39,27 @@ function friendlyNetError(errorText) {
 
 // Selectors - grouped for easy maintenance when ChatGPT UI changes
 // Note: contenteditable is prioritized because ChatGPT uses a hidden fallback textarea
-const SELECTORS = {
-  composer: [
-    'div[contenteditable="true"][data-placeholder]',
-    '#prompt-textarea:not([class*="fallback"])',
-    'textarea[data-id="root"]',
-    'textarea[placeholder*="Message"]'
-  ].join(', '),
+const COMPOSER_SELECTORS = [
+  'div#prompt-textarea[contenteditable="true"]',
+  'div[contenteditable="true"][data-placeholder]',
+  'div[contenteditable="true"][aria-label*="Message"]',
+  '#prompt-textarea:not([class*="fallback"])',
+  'textarea#prompt-textarea',
+  'textarea[data-id="root"]',
+  'textarea[placeholder*="Message"]',
+  '[role="textbox"][contenteditable="true"]'
+];
 
-  sendButton: [
-    'button[data-testid="send-button"]',
-    'button[aria-label*="Send"]',
-    'form button[type="submit"]'
-  ].join(', '),
+const SEND_BUTTON_SELECTORS = [
+  'button[data-testid="send-button"]',
+  'button[aria-label*="Send"]',
+  'form button[type="submit"]'
+];
+
+const SELECTORS = {
+  composer: COMPOSER_SELECTORS.join(', '),
+
+  sendButton: SEND_BUTTON_SELECTORS.join(', '),
 
   stopButton: '[data-testid="stop-button"], button[aria-label*="Stop"]',
 
@@ -77,8 +85,55 @@ const SELECTORS = {
     'button:has-text("Log in")',
     'button:has-text("Sign in")',
     'a[href*="/auth"]'
+  ].join(', '),
+
+  // Positive indicators that the user is logged in.
+  // At least one must be visible to confirm login state.
+  loggedInIndicator: [
+    'nav[aria-label="Chat history"]',
+    '#prompt-textarea',
+    'img[alt="User"]'
   ].join(', ')
 };
+
+/**
+ * Find the first visible locator from a selector list.
+ * Logs the matched selector for easier UI drift debugging.
+ * @param {import('playwright').Page} page
+ * @param {string[]} selectors
+ * @param {string} targetName
+ * @returns {Promise<import('playwright').Locator|null>}
+ */
+async function firstVisibleLocator(page, selectors, targetName) {
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    if (await locator.isVisible({ timeout: 400 }).catch(() => false)) {
+      console.log(`[chatgpt] Using ${targetName} selector: ${selector}`);
+      return locator;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve the composer locator with resilient selector fallbacks.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<import('playwright').Locator>}
+ */
+async function resolveComposer(page) {
+  const matchedComposer = await firstVisibleLocator(page, COMPOSER_SELECTORS, 'composer');
+  if (matchedComposer) return matchedComposer;
+
+  const broadFallback = page.locator('main [role="textbox"], main textarea, main [contenteditable="true"]').first();
+  if (await broadFallback.isVisible({ timeout: 1000 }).catch(() => false)) {
+    console.log('[chatgpt] Using broad composer fallback selector inside <main>');
+    return broadFallback;
+  }
+
+  throw new Error(
+    `Could not find ChatGPT composer. UI may have changed. Tried selectors: ${COMPOSER_SELECTORS.join(' | ')}`
+  );
+}
 
 /**
  * Find or create a ChatGPT page in the browser context.
@@ -126,10 +181,7 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
   await assertLoggedIn(page);
 
   // Use Locator which re-resolves on each action (no stale element issues)
-  const composer = page.locator(SELECTORS.composer).first();
-
-  // Wait for composer to be visible
-  await composer.waitFor({ state: 'visible', timeout: 15000 });
+  const composer = await resolveComposer(page);
 
   // Fill works on textarea, input, AND contenteditable
   await composer.fill(prompt);
@@ -153,7 +205,7 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
         const btn = document.querySelector(sel);
         return btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true';
       },
-      SELECTORS.sendButton.split(', ')[0], // Use first selector for check
+      SEND_BUTTON_SELECTORS[0], // Use first selector for check
       { timeout: 5000 }
     ).catch(() => {});
 
@@ -395,20 +447,44 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
  * @param {import('playwright').Page} page
  * @returns {Promise<boolean>}
  */
-export async function isLoggedIn(page) {
+export async function isLoggedIn(page, { timeout = 15000 } = {}) {
   // Check for logged out state (URL redirect to auth)
   const url = page.url();
   if (url.includes('/auth') || url.includes('login.openai.com')) {
     return false;
   }
 
-  // Check for login button on page
+  // Race: wait for either the login button or a logged-in indicator to appear.
+  // ChatGPT is a SPA -- these elements are rendered by JS after page load,
+  // so we need to give the page time to settle rather than doing a quick
+  // snapshot check.
   const loginBtn = page.locator(SELECTORS.loginButton).first();
-  if (await loginBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+  const indicator = page.locator(SELECTORS.loggedInIndicator).first();
+
+  const LOGIN_BTN = 'loginButton';
+  const INDICATOR = 'loggedInIndicator';
+
+  try {
+    const winner = await Promise.race([
+      loginBtn.waitFor({ state: 'visible', timeout }).then(() => LOGIN_BTN),
+      indicator.waitFor({ state: 'visible', timeout }).then(() => INDICATOR)
+    ]);
+
+    if (winner === LOGIN_BTN) {
+      return false;
+    }
+
+    // Indicator appeared first, but double-check login button isn't also
+    // visible (e.g., transient UI state).
+    if (await loginBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    // Neither appeared within timeout -- ambiguous state, not logged in.
     return false;
   }
-
-  return true;
 }
 
 /**

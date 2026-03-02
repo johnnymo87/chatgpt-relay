@@ -45,13 +45,23 @@ async function main() {
 
   await page.goto(CHATGPT_URL);
 
-  // Wait for login by detecting the chat history panel (left sidebar)
-  // This only appears when logged in, making it a reliable indicator
+  // Wait for login by polling for the login button to disappear.
+  // ChatGPT shows "Log in" / "Sign in" buttons when not authenticated.
+  // We wait until those are gone and a logged-in indicator appears.
   console.log('[ask-question-login] Waiting for login...');
   console.log('[ask-question-login] (Log in, then wait for "Login detected!" message)');
 
-  // Selector for chat history panel (only visible when logged in)
-  const chatHistorySelector = 'nav[aria-label="Chat history"]';
+  const loginButtonSelector = [
+    'button:has-text("Log in")',
+    'button:has-text("Sign in")',
+    'a[href*="/auth"]'
+  ].join(', ');
+
+  const loggedInIndicatorSelector = [
+    'nav[aria-label="Chat history"]',
+    '#prompt-textarea',
+    'img[alt="User"]'
+  ].join(', ');
 
   // Poll until we detect logged-in state
   const startTime = Date.now();
@@ -66,12 +76,21 @@ async function main() {
       continue;
     }
 
-    // Check for chat history panel (only visible when logged in)
-    const chatHistoryVisible = await page.locator(chatHistorySelector)
+    // If login button is visible, user hasn't logged in yet
+    const loginBtnVisible = await page.locator(loginButtonSelector).first()
       .isVisible({ timeout: 500 }).catch(() => false);
 
-    if (chatHistoryVisible) {
-      console.log('[ask-question-login] Login detected! (chat history panel visible)');
+    if (loginBtnVisible) {
+      await page.waitForTimeout(1000);
+      continue;
+    }
+
+    // Login button gone -- verify with a positive indicator
+    const indicatorVisible = await page.locator(loggedInIndicatorSelector).first()
+      .isVisible({ timeout: 500 }).catch(() => false);
+
+    if (indicatorVisible) {
+      console.log('[ask-question-login] Login detected! (login button gone, logged-in indicator visible)');
       break;
     }
 
@@ -79,8 +98,8 @@ async function main() {
   }
 
   if (Date.now() - startTime >= maxWait) {
-    console.error('[ask-question-login] Timeout: Chat history panel not found.');
-    console.error('[ask-question-login] Login may have failed. Please try again.');
+    console.error('[ask-question-login] Timeout: Login not detected within 5 minutes.');
+    console.error('[ask-question-login] Please try again.');
     await browser.close();
     process.exit(1);
   }

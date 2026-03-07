@@ -40,7 +40,13 @@ async function main() {
     ]
   });
 
-  const context = await browser.newContext();
+  // Load existing session if available, so credentials persist across runs
+  const contextOptions = {};
+  if (fs.existsSync(STORAGE_STATE_FILE)) {
+    contextOptions.storageState = STORAGE_STATE_FILE;
+    console.log(`[ask-question-login] Loading existing session from: ${STORAGE_STATE_FILE}`);
+  }
+  const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
 
   await page.goto(CHATGPT_URL);

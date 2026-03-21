@@ -45,7 +45,9 @@ async function processRequest(prompt, opts = {}) {
     await navigateToNewChat(page);
   }
 
-  log('Processing...');
+  // Debug: log page state before processing
+  log(`Processing... URL=${page.url()}`);
+
   try {
     const response = await sendPromptAndWait(page, prompt, { timeout });
     return response;
@@ -158,16 +160,20 @@ async function main() {
     console.log(`[ask-question-server] Using Chromium: ${executablePath}`);
   }
 
-  // Launch browser with anti-throttling flags
-  // See: https://developer.chrome.com/docs/web-platform/page-lifecycle-api
+  // Launch browser
+  // --disable-gpu: Required for background/daemon processes on macOS.
+  //   Without it, GPU-accelerated rendering fails silently in backgrounded
+  //   processes, causing ChatGPT's React DOM to never hydrate response text.
+  // Note: anti-throttling flags (--disable-background-timer-throttling,
+  // --disable-backgrounding-occluded-windows, --disable-renderer-backgrounding)
+  // were removed because they also interfere with ChatGPT's React rendering
+  // pipeline, causing the same empty DOM issue (March 2026).
   browser = await chromium.launch({
     headless: true,
     executablePath,
     args: [
       '--disable-blink-features=AutomationControlled',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding'
+      '--disable-gpu'
     ]
   });
 
@@ -191,6 +197,20 @@ async function main() {
     process.exit(1);
   }
   console.log('[ask-question-server] Login verified.');
+
+  // Wait for the composer to be ready. ChatGPT's SPA needs time to fully
+  // hydrate after page load -- the login indicator can appear before React
+  // has finished rendering the composer.
+  try {
+    await page.locator('div#prompt-textarea[contenteditable="true"]')
+      .first().waitFor({ state: 'visible', timeout: 10000 });
+    console.log('[ask-question-server] Composer ready.');
+  } catch {
+    console.log('[ask-question-server] Warning: composer not ready after 10s, continuing anyway.');
+  }
+
+  // Extra settling time for the SPA to fully initialize.
+  await page.waitForTimeout(2000);
 
   // Start HTTP server
   const server = http.createServer(handleRequest);

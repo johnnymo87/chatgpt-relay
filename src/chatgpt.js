@@ -38,16 +38,13 @@ function friendlyNetError(errorText) {
 }
 
 // Selectors - grouped for easy maintenance when ChatGPT UI changes
-// Note: contenteditable is prioritized because ChatGPT uses a hidden fallback textarea
+// Note: contenteditable is prioritized because ChatGPT uses a hidden fallback textarea.
+// Last verified: March 2026. ChatGPT uses a ProseMirror contenteditable div.
 const COMPOSER_SELECTORS = [
   'div#prompt-textarea[contenteditable="true"]',
-  'div[contenteditable="true"][data-placeholder]',
-  'div[contenteditable="true"][aria-label*="Message"]',
   '#prompt-textarea:not([class*="fallback"])',
-  'textarea#prompt-textarea',
-  'textarea[data-id="root"]',
-  'textarea[placeholder*="Message"]',
-  '[role="textbox"][contenteditable="true"]'
+  '[role="textbox"][contenteditable="true"]',
+  'div.ProseMirror[contenteditable="true"]',
 ];
 
 const SEND_BUTTON_SELECTORS = [
@@ -65,10 +62,15 @@ const SELECTORS = {
 
   assistantMessage: '[data-message-author-role="assistant"]',
 
+  // Turn container selector (March 2026: changed from article to section)
+  assistantTurn: 'section[data-turn="assistant"]',
+
   // Error state selectors
+  // Note: [role="alert"] was intentionally removed -- it's too broad and
+  // matches ARIA live regions (e.g., screen-reader announcements) that
+  // are not actual error toasts, causing false-positive failures.
   errorToast: [
     '[data-testid="error-toast"]',
-    '[role="alert"]',
     '.toast-error',
     'div:has-text("Something went wrong")'
   ].join(', '),
@@ -89,10 +91,10 @@ const SELECTORS = {
 
   // Positive indicators that the user is logged in.
   // At least one must be visible to confirm login state.
+  // Note: img[alt="User"] removed March 2026 -- no longer present in ChatGPT UI.
   loggedInIndicator: [
     'nav[aria-label="Chat history"]',
-    '#prompt-textarea',
-    'img[alt="User"]'
+    '#prompt-textarea'
   ].join(', ')
 };
 
@@ -107,7 +109,7 @@ const SELECTORS = {
 async function firstVisibleLocator(page, selectors, targetName) {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
-    if (await locator.isVisible({ timeout: 400 }).catch(() => false)) {
+    if (await locator.isVisible({ timeout: 500 }).catch(() => false)) {
       console.log(`[chatgpt] Using ${targetName} selector: ${selector}`);
       return locator;
     }
@@ -124,8 +126,10 @@ async function resolveComposer(page) {
   const matchedComposer = await firstVisibleLocator(page, COMPOSER_SELECTORS, 'composer');
   if (matchedComposer) return matchedComposer;
 
-  const broadFallback = page.locator('main [role="textbox"], main textarea, main [contenteditable="true"]').first();
-  if (await broadFallback.isVisible({ timeout: 1000 }).catch(() => false)) {
+  // Broad fallback: scope to visible contenteditable elements inside <main>.
+  // Excludes bare 'textarea' which can match the hidden ProseMirror fallback textarea.
+  const broadFallback = page.locator('main [role="textbox"], main [contenteditable="true"]').first();
+  if (await broadFallback.isVisible({ timeout: 2000 }).catch(() => false)) {
     console.log('[chatgpt] Using broad composer fallback selector inside <main>');
     return broadFallback;
   }
@@ -156,6 +160,7 @@ export async function getOrCreateChatGPTPage(context) {
 
 /**
  * Navigate to a fresh chat.
+ * Waits for the composer to be ready after navigation.
  * @param {import('playwright').Page} page
  */
 export async function navigateToNewChat(page) {
@@ -163,6 +168,17 @@ export async function navigateToNewChat(page) {
   if (url !== CHATGPT_URL && url !== `${CHATGPT_URL}/`) {
     await page.goto(CHATGPT_URL);
     await page.waitForLoadState('domcontentloaded');
+  }
+
+  // Wait for the composer to be interactive after navigation.
+  // ChatGPT's SPA re-renders the composer after route changes, which can
+  // take several seconds. Without this wait, resolveComposer() may fail.
+  try {
+    await page.locator('div#prompt-textarea[contenteditable="true"]')
+      .first().waitFor({ state: 'visible', timeout: 10000 });
+  } catch {
+    // If composer doesn't appear, resolveComposer will handle with fallbacks
+    console.log('[chatgpt] Composer not visible after navigation, will try fallbacks');
   }
 }
 
@@ -240,6 +256,68 @@ async function readClipboardText(page) {
 }
 
 /**
+ * Extract response text via the copy button on the turn container.
+ * This is the most reliable method as it preserves markdown formatting
+ * and works even when innerText returns empty (e.g., thinking model responses).
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} messageLocator - The assistant message locator
+ * @returns {Promise<string>}
+ */
+async function extractViaCopyButton(page, messageLocator) {
+  // Navigate up to the turn container (section) that holds both message and action buttons
+  // ChatGPT DOM (March 2026): section[data-testid][data-turn] > ... > div[data-message-author-role] (message)
+  //                                                           > div (action bar with copy button)
+  // Note: previously used <article>, OpenAI changed to <section> circa early 2026.
+  const turnContainer = messageLocator.locator('xpath=ancestor::section[@data-testid]');
+
+  // Check if turn container was found (DOM structure may have changed)
+  if (await turnContainer.count() === 0) {
+    throw new Error('Turn container not found');
+  }
+
+  const copyBtn = turnContainer.locator(SELECTORS.copyTurnButton);
+
+  // Hover the turn container to reveal action buttons (they have pointer-events:none until hover)
+  await turnContainer.hover({ timeout: 2000 }).catch(() => {});
+
+  // Use waitFor, not isVisible(timeout) - timeout is ignored in isVisible
+  await copyBtn.waitFor({ state: 'visible', timeout: 1500 });
+
+  // Ensure document focus (helps with Clipboard API in some cases)
+  await page.click('body', { position: { x: 5, y: 5 }, timeout: 1000 }).catch(() => {});
+
+  // Snapshot clipboard before click
+  const before = await readClipboardText(page);
+
+  // Use force:true to bypass pointer-events:none overlay on action bar
+  await copyBtn.click({ timeout: 1500, force: true });
+
+  // Poll until clipboard changes (more robust than fixed wait)
+  const handle = await page.waitForFunction(
+    async (prev) => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (!text || !text.trim()) return null;
+        if (prev && text === prev) return null;
+        return text;
+      } catch {
+        return null;
+      }
+    },
+    before,
+    { timeout: 2000 }
+  );
+
+  const copied = await handle.jsonValue();
+  if (copied && copied.trim()) {
+    console.log(`[chatgpt] Extracted via copy button (${copied.length} chars)`);
+    return copied.trim();
+  }
+
+  throw new Error('Copy button clicked but clipboard empty');
+}
+
+/**
  * Extract response text via copy button (preferred) or innerText (fallback).
  * Copy button preserves markdown formatting.
  * @param {import('playwright').Page} page
@@ -249,56 +327,8 @@ async function readClipboardText(page) {
 async function extractResponseText(page, messageLocator) {
   // Try clipboard extraction (best effort)
   try {
-    // Navigate up to the turn container (article) that holds both message and action buttons
-    // ChatGPT DOM: article[data-testid] > div > div[data-message-author-role] (message)
-    //                                       > div (action bar with copy button)
-    const turnContainer = messageLocator.locator('xpath=ancestor::article[@data-testid]');
-
-    // Check if turn container was found (DOM structure may have changed)
-    if (await turnContainer.count() === 0) {
-      console.log('[chatgpt] Turn container not found (DOM may have changed), using innerText');
-      const text = await messageLocator.innerText();
-      return text.trim();
-    }
-
-    const copyBtn = turnContainer.locator(SELECTORS.copyTurnButton);
-
-    // Hover the turn container to reveal action buttons (they have pointer-events:none until hover)
-    await turnContainer.hover({ timeout: 2000 }).catch(() => {});
-
-    // Use waitFor, not isVisible(timeout) - timeout is ignored in isVisible
-    await copyBtn.waitFor({ state: 'visible', timeout: 1500 });
-
-    // Ensure document focus (helps with Clipboard API in some cases)
-    await page.click('body', { position: { x: 5, y: 5 }, timeout: 1000 }).catch(() => {});
-
-    // Snapshot clipboard before click
-    const before = await readClipboardText(page);
-
-    // Use force:true to bypass pointer-events:none overlay on action bar
-    await copyBtn.click({ timeout: 1500, force: true });
-
-    // Poll until clipboard changes (more robust than fixed wait)
-    const handle = await page.waitForFunction(
-      async (prev) => {
-        try {
-          const text = await navigator.clipboard.readText();
-          if (!text || !text.trim()) return null;
-          if (prev && text === prev) return null;
-          return text;
-        } catch {
-          return null;
-        }
-      },
-      before,
-      { timeout: 2000 }
-    );
-
-    const copied = await handle.jsonValue();
-    if (copied && copied.trim()) {
-      console.log(`[chatgpt] Extracted via copy button (${copied.length} chars)`);
-      return copied.trim();
-    }
+    const text = await extractViaCopyButton(page, messageLocator);
+    return text;
   } catch (e) {
     console.log(`[chatgpt] Copy button extraction failed: ${e.message}, falling back to innerText`);
   }
@@ -388,11 +418,20 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
   }
 
   // Step 4: Wait for text to stabilize (stops changing for ~1.5s)
+  // Initial hydration delay: ChatGPT's React app needs time to render
+  // the response text into the DOM after the stop button disappears.
+  // Without this, innerText returns empty for the first several seconds.
+  console.log('[chatgpt] Waiting for DOM hydration...');
+  await page.waitForTimeout(2000);
+
   console.log('[chatgpt] Waiting for response to stabilize...');
   const startTime = Date.now();
   let lastText = '';
   let stableMs = 0;
+  let emptyTextMs = 0;
   const stabilityThreshold = 1500; // 1.5 seconds of no changes
+  const emptyTextFallbackMs = 10000; // Try copy button after 10s of empty text
+  let loggedEmptyOnce = false;
 
   while (Date.now() - startTime < timeout) {
     // Check for error states
@@ -404,21 +443,78 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
       console.log('[chatgpt] Clicking "Continue generating"...');
       await continueBtn.click().catch(() => {});
       stableMs = 0;
+      emptyTextMs = 0;
       await page.waitForTimeout(500);
       continue;
     }
 
-    const currentText = (await lastAssistant.innerText().catch((e) => {
-      console.log(`[chatgpt] innerText error: ${e.message}`);
-      return '';
-    })).trim();
-    if (!currentText && stableMs === 0) {
-      // Log once when we first see empty text (usually transient during generation)
-      const count = await page.locator(SELECTORS.assistantMessage).count();
-      console.log(`[chatgpt] Empty text, assistant message count: ${count}`);
+    // Try multiple extraction strategies, from most specific to broadest:
+    // 1. Message element innerText (Playwright locator)
+    // 2. DOM evaluate on the message element (bypasses Playwright rendering)
+    // 3. Section-level text extraction (gets all text in the turn)
+    let currentText = (await lastAssistant.innerText().catch(() => '')).trim();
+
+    if (!currentText) {
+      // Fallback: use page.evaluate() to get text directly from the DOM.
+      // Some Chromium versions don't populate text in the Playwright locator
+      // while it IS accessible via direct DOM access.
+      currentText = await page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return '';
+        // Try the .markdown container's text specifically
+        const markdown = el.querySelector('.markdown');
+        if (markdown) {
+          const text = markdown.innerText?.trim();
+          if (text) return text;
+        }
+        return el.innerText?.trim() || '';
+      }, SELECTORS.assistantMessage).catch(() => '');
     }
 
-    if (currentText && currentText === lastText) {
+    if (!currentText) {
+      // Fallback: get text from the section turn container
+      currentText = await page.evaluate(() => {
+        const section = document.querySelector('section[data-turn="assistant"]');
+        if (!section) return '';
+        // Get text from the message area, skipping UI labels like "ChatGPT said:"
+        const msg = section.querySelector('[data-message-author-role="assistant"]');
+        if (msg) {
+          const markdown = msg.querySelector('.markdown');
+          if (markdown) return markdown.innerText?.trim() || '';
+          return msg.innerText?.trim() || '';
+        }
+        return '';
+      }).catch(() => '');
+    }
+
+    if (!currentText) {
+      emptyTextMs += 250;
+      if (!loggedEmptyOnce) {
+        loggedEmptyOnce = true;
+        console.log(`[chatgpt] All text extraction methods returning empty, will try copy button after ${emptyTextFallbackMs / 1000}s`);
+      }
+
+      // After emptyTextFallbackMs of empty text, try copy button extraction.
+      if (emptyTextMs >= emptyTextFallbackMs) {
+        console.log('[chatgpt] Text still empty, trying copy button extraction...');
+        const copyText = await extractViaCopyButton(page, lastAssistant).catch(() => '');
+        if (copyText) {
+          console.log(`[chatgpt] Copy button extraction succeeded (${copyText.length} chars)`);
+          return copyText;
+        }
+        console.log('[chatgpt] Copy button extraction also failed, continuing to poll...');
+        // Reset so we don't spam copy button attempts every 250ms
+        emptyTextMs = emptyTextFallbackMs - 5000;
+      }
+
+      await page.waitForTimeout(250);
+      continue;
+    }
+
+    // Got non-empty text, reset empty counter
+    emptyTextMs = 0;
+
+    if (currentText === lastText) {
       stableMs += 250;
       if (stableMs >= stabilityThreshold) {
         console.log(`[chatgpt] Response stabilized (${currentText.length} chars)`);
@@ -432,11 +528,19 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
     await page.waitForTimeout(250);
   }
 
-  // Timeout - return whatever we have
+  // Timeout - try all extraction methods before giving up
+  console.log('[chatgpt] Timeout reached, trying final extraction...');
   const finalText = await extractResponseText(page, lastAssistant).catch(() => '');
   if (finalText) {
     console.log(`[chatgpt] Timeout but have partial response (${finalText.length} chars)`);
     return finalText;
+  }
+
+  // Last resort: try copy button
+  const copyText = await extractViaCopyButton(page, lastAssistant).catch(() => '');
+  if (copyText) {
+    console.log(`[chatgpt] Timeout but got response via copy button (${copyText.length} chars)`);
+    return copyText;
   }
 
   throw new Error('Timeout waiting for ChatGPT response');
@@ -508,7 +612,10 @@ async function checkErrorStates(page) {
   // Check for error toast
   const errorToast = page.locator(SELECTORS.errorToast).first();
   if (await errorToast.isVisible({ timeout: 100 }).catch(() => false)) {
-    const errorText = await errorToast.innerText().catch(() => 'Unknown error');
-    throw new Error(`ChatGPT error: ${errorText.trim()}`);
+    const errorText = (await errorToast.innerText().catch(() => '')).trim();
+    // Skip empty text -- likely a non-error ARIA element, not a real toast
+    if (errorText) {
+      throw new Error(`ChatGPT error: ${errorText}`);
+    }
   }
 }

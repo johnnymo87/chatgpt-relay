@@ -23,8 +23,47 @@ const SHUTDOWN_TIMEOUT_MS = 5000;
 let browser = null;
 let context = null;
 let page = null;
-let requestQueue = Promise.resolve();
+let tail = Promise.resolve();
 let shuttingDown = false;
+
+// Browser launch configuration, extracted for reuse in recovery.
+function getBrowserLaunchOptions() {
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined;
+  return {
+    headless: true,
+    executablePath,
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--disable-gpu'
+    ]
+  };
+}
+
+/**
+ * Ensure the browser is alive and connected. If the browser has crashed
+ * or been killed, relaunch it and recreate the context.
+ * This prevents the daemon from becoming permanently stuck after a
+ * browser crash (cgpt-wzp).
+ */
+async function ensureBrowserAlive() {
+  if (browser && browser.isConnected()) return;
+
+  console.log('[ask-question-server] Browser disconnected, relaunching...');
+
+  // Clean up dead references
+  page = null;
+
+  // Attempt to close stale browser (may no-op if already dead)
+  try { await browser?.close(); } catch { /* already dead */ }
+
+  browser = await chromium.launch(getBrowserLaunchOptions());
+  context = await browser.newContext({
+    storageState: STORAGE_STATE_FILE,
+    permissions: ['clipboard-read', 'clipboard-write']
+  });
+
+  console.log('[ask-question-server] Browser relaunched successfully.');
+}
 
 /**
  * Process a prompt request (serialized via queue).
@@ -33,11 +72,25 @@ async function processRequest(prompt, opts = {}) {
   const { timeout = 1200000, newChat = false, requestId = '?' } = opts;
   const log = (msg) => console.log(`[ask-question-server] [${requestId}] ${msg}`);
 
+  // Ensure browser is still alive (recovers from crashes)
+  await ensureBrowserAlive();
+
   // Ensure we have a page
   if (!page || page.isClosed()) {
     log('Creating new page...');
     page = await context.newPage();
     await page.goto('https://chatgpt.com');
+    await page.waitForLoadState('domcontentloaded');
+
+    // Wait for the composer to be ready before accepting the request.
+    // ChatGPT's SPA needs time to hydrate after page load.
+    try {
+      await page.locator('div#prompt-textarea[contenteditable="true"]')
+        .first().waitFor({ state: 'visible', timeout: 15000 });
+      log('Page ready (composer visible).');
+    } catch {
+      log('Warning: composer not visible after 15s on new page, proceeding anyway.');
+    }
   }
 
   if (newChat) {
@@ -70,15 +123,78 @@ async function processRequest(prompt, opts = {}) {
 }
 
 /**
+ * Wrap a promise-producing function with a hard watchdog timeout.
+ * When the watchdog fires, onTimeout is called (should close the page
+ * to cancel in-flight Playwright operations) and the promise rejects.
+ *
+ * This is different from Promise.race with a timeout because it
+ * actively cleans up (closes the page) rather than just ignoring
+ * the stuck operation.
+ */
+function withWatchdog(promiseFactory, ms, onTimeout) {
+  let timer;
+  return Promise.race([
+    promiseFactory(),
+    new Promise((_, reject) => {
+      timer = setTimeout(async () => {
+        try { await onTimeout(); } catch { /* best effort */ }
+        reject(new Error(`Watchdog timeout after ${Math.round(ms / 1000)}s`));
+      }, ms);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
  * Queue a request to ensure serialization.
+ *
+ * Uses the "tail" pattern: the caller gets the actual job promise
+ * (with real result/error), while the tail swallows errors to keep
+ * the queue alive after failures. This prevents one failed request
+ * from breaking the entire queue chain.
+ *
+ * Each request is wrapped in a watchdog that closes the page if the
+ * request exceeds its timeout + a grace period. This is the only
+ * reliable way to cancel in-flight Playwright operations.
  */
 function queueRequest(prompt, opts) {
-  return new Promise((resolve, reject) => {
-    requestQueue = requestQueue
-      .then(() => processRequest(prompt, opts))
-      .then(resolve)
-      .catch(reject);
+  const requestTimeout = opts?.timeout ?? 1200000;
+  // Watchdog fires 30s after the request's own timeout, giving the
+  // circuit breaker and normal error handling time to act first.
+  const watchdogMs = requestTimeout + 30000;
+  const enqueuedAt = Date.now();
+  // Reject if waited longer than 5 minutes in queue before starting.
+  // This prevents requests from piling up and becoming stale.
+  const queueWaitMs = opts?.queueWaitMs ?? 300000;
+
+  const job = tail.then(() => {
+    // Skip work if client already disconnected while waiting in queue.
+    if (opts?.signal?.aborted) {
+      throw new Error('Client disconnected before processing started');
+    }
+
+    // Skip work if waited too long in queue (request is probably stale).
+    const waitedMs = Date.now() - enqueuedAt;
+    if (queueWaitMs && waitedMs > queueWaitMs) {
+      const reqId = opts?.requestId ?? '?';
+      console.log(`[ask-question-server] [${reqId}] Queue wait exceeded ${Math.round(queueWaitMs / 1000)}s (waited ${Math.round(waitedMs / 1000)}s), skipping`);
+      throw new Error(`Queue wait exceeded ${Math.round(queueWaitMs / 1000)}s`);
+    }
+
+    return withWatchdog(
+      () => processRequest(prompt, opts),
+      watchdogMs,
+      async () => {
+        const reqId = opts?.requestId ?? '?';
+        console.error(`[ask-question-server] [${reqId}] Watchdog fired after ${Math.round(watchdogMs / 1000)}s, closing page...`);
+        try {
+          if (page && !page.isClosed()) await page.close();
+        } catch { /* already dead */ }
+        page = null;
+      }
+    );
   });
+  tail = job.catch(() => {}); // swallow for tail only — keeps queue alive
+  return job; // caller gets actual result/error
 }
 
 /**
@@ -119,20 +235,52 @@ async function handleRequest(req, res) {
     }
 
     const reqId = data.requestId || 'unknown';
+    console.log(`[ask-question-server] [${reqId}] Received (${data.prompt.length} chars)`);
+
+    // Client disconnect detection: abort queued work if client drops.
+    const ac = new AbortController();
+    res.on('close', () => {
+      if (!res.writableFinished) {
+        console.log(`[ask-question-server] [${reqId}] Client disconnected`);
+        ac.abort();
+      }
+    });
+
+    // Send headers immediately and start heartbeat to keep connection
+    // alive during long processing. JSON.parse handles leading whitespace,
+    // so the client can parse the final JSON payload normally.
+    // Note: we always send 200 since headers go out before we know the
+    // outcome. The client checks data.ok, not the HTTP status code.
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      // Omit Content-Length to use chunked transfer encoding
+    });
+    res.flushHeaders?.();
+
+    const heartbeat = setInterval(() => {
+      if (!res.writableFinished && !res.destroyed) {
+        res.write(' ');
+      }
+    }, 15000);
+
     try {
-      console.log(`[ask-question-server] [${reqId}] Received (${data.prompt.length} chars)`);
       const response = await queueRequest(data.prompt, {
         timeout: data.timeout,
         newChat: data.newChat,
-        requestId: reqId
+        requestId: reqId,
+        signal: ac.signal,
       });
+      clearInterval(heartbeat);
       console.log(`[ask-question-server] [${reqId}] Sending response (${response.length} chars)`);
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, text: response }));
     } catch (e) {
+      clearInterval(heartbeat);
+      // If client already disconnected, don't try to write
+      if (res.writableFinished || res.destroyed) {
+        console.log(`[ask-question-server] [${reqId}] Error after client disconnect: ${e.message}`);
+        return;
+      }
       console.error(`[ask-question-server] [${reqId}] Error: ${e.message}`);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: e.message }));
     }
     return;
@@ -154,12 +302,6 @@ async function main() {
   console.log('[ask-question-server] Starting headless browser...');
   console.log(`[ask-question-server] Using session: ${STORAGE_STATE_FILE}`);
 
-  // Support Nix-provided Chromium via PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined;
-  if (executablePath) {
-    console.log(`[ask-question-server] Using Chromium: ${executablePath}`);
-  }
-
   // Launch browser
   // --disable-gpu: Required for background/daemon processes on macOS.
   //   Without it, GPU-accelerated rendering fails silently in backgrounded
@@ -168,14 +310,11 @@ async function main() {
   // --disable-backgrounding-occluded-windows, --disable-renderer-backgrounding)
   // were removed because they also interfere with ChatGPT's React rendering
   // pipeline, causing the same empty DOM issue (March 2026).
-  browser = await chromium.launch({
-    headless: true,
-    executablePath,
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--disable-gpu'
-    ]
-  });
+  const launchOpts = getBrowserLaunchOptions();
+  if (launchOpts.executablePath) {
+    console.log(`[ask-question-server] Using Chromium: ${launchOpts.executablePath}`);
+  }
+  browser = await chromium.launch(launchOpts);
 
   // Create context with saved cookies/localStorage
   context = await browser.newContext({

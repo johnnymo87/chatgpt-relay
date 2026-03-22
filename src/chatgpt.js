@@ -37,6 +37,69 @@ function friendlyNetError(errorText) {
   return `Network error: ${t || 'unknown'}`;
 }
 
+/**
+ * Create a network guard that rejects when critical network requests fail.
+ * Race this against DOM waits to detect network disconnections quickly
+ * instead of waiting for a 10+ minute timeout.
+ *
+ * @param {import('playwright').Page} page
+ * @returns {{ promise: Promise<void>, dispose: () => void }}
+ */
+function createNetworkGuard(page) {
+  let rejectFn;
+  let onRequestFailed;
+  let onCrash;
+  let onClose;
+
+  const promise = new Promise((_, reject) => {
+    rejectFn = reject;
+
+    onRequestFailed = (request) => {
+      const url = request.url();
+      // Only watch chat-related endpoints (not images, analytics, etc.)
+      const isChatEndpoint =
+        url.includes('/backend-api/') ||
+        url.includes('/backend-anon/') ||
+        url.includes('/conversation');
+      if (!isChatEndpoint) return;
+
+      const failure = request.failure();
+      const errorText = failure?.errorText || '';
+
+      // Only reject on connectivity errors, not transient 4xx/5xx
+      const isFatal =
+        errorText.includes('ERR_INTERNET_DISCONNECTED') ||
+        errorText.includes('ERR_NETWORK_CHANGED') ||
+        errorText.includes('ERR_NAME_NOT_RESOLVED') ||
+        errorText.includes('ERR_CONNECTION_TIMED_OUT') ||
+        errorText.includes('ERR_CONNECTION_REFUSED') ||
+        errorText.includes('ERR_CONNECTION_RESET') ||
+        errorText.includes('net::ERR_FAILED');
+      if (!isFatal) return;
+
+      reject(new Error(`Network failure: ${friendlyNetError(errorText)}`));
+    };
+
+    onCrash = () => reject(new Error('Browser tab crashed'));
+    onClose = () => reject(new Error('Page closed unexpectedly'));
+
+    page.on('requestfailed', onRequestFailed);
+    page.on('crash', onCrash);
+    page.on('close', onClose);
+  });
+
+  // Prevent unhandled rejection if guard is never raced against
+  promise.catch(() => {});
+
+  const dispose = () => {
+    page.off('requestfailed', onRequestFailed);
+    page.off('crash', onCrash);
+    page.off('close', onClose);
+  };
+
+  return { promise, dispose };
+}
+
 // Selectors - grouped for easy maintenance when ChatGPT UI changes
 // Note: contenteditable is prioritized because ChatGPT uses a hidden fallback textarea.
 // Last verified: March 2026. ChatGPT uses a ProseMirror contenteditable div.
@@ -69,10 +132,12 @@ const SELECTORS = {
   // Note: [role="alert"] was intentionally removed -- it's too broad and
   // matches ARIA live regions (e.g., screen-reader announcements) that
   // are not actual error toasts, causing false-positive failures.
+  // Note: bare 'div:has-text("Something went wrong")' was removed because
+  // it matches the entire page body (any ancestor div containing the text),
+  // producing error messages that include the full page innerText.
   errorToast: [
     '[data-testid="error-toast"]',
     '.toast-error',
-    'div:has-text("Something went wrong")'
   ].join(', '),
 
   continueButton: [
@@ -193,8 +258,8 @@ export async function navigateToNewChat(page) {
 export async function sendPromptAndWait(page, prompt, opts = {}) {
   const timeout = opts.timeout ?? 1200000;
 
-  // Check login state before attempting to fill composer
-  await assertLoggedIn(page);
+  // Pre-flight checks: verify page is ready for input
+  await assertReadyForInput(page);
 
   // Use Locator which re-resolves on each action (no stale element issues)
   const composer = await resolveComposer(page);
@@ -352,20 +417,35 @@ async function extractResponseText(page, messageLocator) {
 async function waitForResponse(page, beforeCount, timeout, streamResponsePromise) {
   const stopBtn = page.locator(SELECTORS.stopButton);
 
+  // Network guard: detects connectivity failures via requestfailed events.
+  // This catches broader failures than streamResponse.finished() alone
+  // (e.g., failures in non-streaming requests, post-stream disconnects).
+  const networkGuard = createNetworkGuard(page);
+
+  try {
+    return await _waitForResponseInner(page, stopBtn, beforeCount, timeout, streamResponsePromise, networkGuard);
+  } finally {
+    networkGuard.dispose();
+  }
+}
+
+async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, streamResponsePromise, networkGuard) {
   // Get the stream response (may be null if not captured)
   const streamResponse = await streamResponsePromise;
-  let networkErrorPromise = null;
+  let networkErrorPromise = networkGuard.promise;
 
   if (streamResponse) {
     console.log('[chatgpt] Tracking stream response for network failures');
-    // response.finished() returns null on success, Error on failure
-    networkErrorPromise = streamResponse.finished().then((maybeErr) => {
+    // response.finished() returns null on success, Error on failure.
+    // Race this against the broader network guard for defense-in-depth.
+    const streamFinished = streamResponse.finished().then((maybeErr) => {
       if (maybeErr instanceof Error) {
         throw new Error(`Network failure: ${friendlyNetError(maybeErr.message)}`);
       }
       // Success - return a sentinel that won't affect the race
       return { __networkOk: true };
     });
+    networkErrorPromise = Promise.race([networkGuard.promise, streamFinished]);
   }
 
   // Step 1: Wait for stop button to APPEAR (generation started)
@@ -429,9 +509,16 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
   let lastText = '';
   let stableMs = 0;
   let emptyTextMs = 0;
+  let consecutiveEmptyIterations = 0;
+  // After this many consecutive all-empty iterations (~30s of 250ms polling,
+  // plus the 2s hydration delay = ~32s total), give up and throw.
+  // This is deliberately generous to accommodate slow rendering, extended
+  // thinking responses, and the copy-button fallback attempts.
+  const maxConsecutiveEmptyIterations = 120;
   const stabilityThreshold = 1500; // 1.5 seconds of no changes
   const emptyTextFallbackMs = 10000; // Try copy button after 10s of empty text
   let loggedEmptyOnce = false;
+  let loggedInnerTextError = false;
 
   while (Date.now() - startTime < timeout) {
     // Check for error states
@@ -452,7 +539,13 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
     // 1. Message element innerText (Playwright locator)
     // 2. DOM evaluate on the message element (bypasses Playwright rendering)
     // 3. Section-level text extraction (gets all text in the turn)
-    let currentText = (await lastAssistant.innerText().catch(() => '')).trim();
+    let currentText = (await lastAssistant.innerText().catch(e => {
+      if (!loggedInnerTextError) {
+        console.warn(`[chatgpt] innerText failed: ${e.message}`);
+        loggedInnerTextError = true;
+      }
+      return '';
+    })).trim();
 
     if (!currentText) {
       // Fallback: use page.evaluate() to get text directly from the DOM.
@@ -489,9 +582,22 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
 
     if (!currentText) {
       emptyTextMs += 250;
+      consecutiveEmptyIterations++;
       if (!loggedEmptyOnce) {
         loggedEmptyOnce = true;
         console.log(`[chatgpt] All text extraction methods returning empty, will try copy button after ${emptyTextFallbackMs / 1000}s`);
+      }
+
+      // Circuit breaker: if ALL extraction strategies have returned empty
+      // for too long after generation completed, something is fundamentally
+      // wrong (stale page state, DOM structure change, rendering failure).
+      // Throwing lets processRequest() close the page and reset state.
+      if (consecutiveEmptyIterations >= maxConsecutiveEmptyIterations) {
+        throw new Error(
+          `Response text empty after ${Math.round(consecutiveEmptyIterations * 250 / 1000)}s of polling ` +
+          `(${consecutiveEmptyIterations} consecutive empty iterations across all extraction strategies). ` +
+          'Page may have stale state or ChatGPT DOM structure may have changed.'
+        );
       }
 
       // After emptyTextFallbackMs of empty text, try copy button extraction.
@@ -511,8 +617,9 @@ async function waitForResponse(page, beforeCount, timeout, streamResponsePromise
       continue;
     }
 
-    // Got non-empty text, reset empty counter
+    // Got non-empty text, reset empty counters
     emptyTextMs = 0;
+    consecutiveEmptyIterations = 0;
 
     if (currentText === lastText) {
       stableMs += 250;
@@ -592,6 +699,47 @@ export async function isLoggedIn(page, { timeout = 15000 } = {}) {
 }
 
 /**
+ * Pre-flight check: verify the page is in a valid state to accept input.
+ * Checks login state, waits for the composer, and dismisses known blockers.
+ * Fails fast with a clear error instead of a 30s fill timeout.
+ * @param {import('playwright').Page} page
+ */
+async function assertReadyForInput(page) {
+  // Check login state
+  await assertLoggedIn(page);
+
+  // Wait for the composer to be visible (SPA may still be hydrating)
+  const composer = page.locator(COMPOSER_SELECTORS[0]).first();
+  try {
+    await composer.waitFor({ state: 'visible', timeout: 10000 });
+  } catch {
+    throw new Error(
+      'Composer not visible after 10s. Page may be blocked by a modal, ' +
+      'rate limit, or ChatGPT UI change.'
+    );
+  }
+
+  // Dismiss known blocking modals (best-effort, don't fail if not found).
+  // These are common ChatGPT popups that block the composer.
+  const dismissible = [
+    // Generic modal/dialog close buttons
+    '[data-testid="modal"] button[aria-label="Close"]',
+    'dialog button[aria-label="Close"]',
+    // "Upgrade to Plus" dismiss
+    'button[aria-label="Dismiss"]',
+  ];
+  for (const sel of dismissible) {
+    const btn = page.locator(sel).first();
+    if (await btn.isVisible({ timeout: 200 }).catch(() => false)) {
+      console.log(`[chatgpt] Dismissing modal: ${sel}`);
+      await btn.click({ timeout: 1000 }).catch(() => {});
+      // Brief pause for modal animation to complete
+      await page.waitForTimeout(300);
+    }
+  }
+}
+
+/**
  * Assert that the user is logged in, throwing a clear error if not.
  * @param {import('playwright').Page} page
  */
@@ -609,13 +757,23 @@ async function checkErrorStates(page) {
   // Check for logged out state
   await assertLoggedIn(page);
 
-  // Check for error toast
+  // Check for error toast (data-testid based)
   const errorToast = page.locator(SELECTORS.errorToast).first();
   if (await errorToast.isVisible({ timeout: 100 }).catch(() => false)) {
     const errorText = (await errorToast.innerText().catch(() => '')).trim();
     // Skip empty text -- likely a non-error ARIA element, not a real toast
     if (errorText) {
       throw new Error(`ChatGPT error: ${errorText}`);
+    }
+  }
+
+  // Check for "Something went wrong" inside the last assistant turn.
+  // Scoped to the turn container to avoid matching the entire page body.
+  const lastTurn = page.locator(SELECTORS.assistantTurn).last();
+  if (await lastTurn.count() > 0) {
+    const turnText = await lastTurn.innerText({ timeout: 200 }).catch(() => '');
+    if (turnText.includes('Something went wrong')) {
+      throw new Error('ChatGPT error: Something went wrong while processing your request.');
     }
   }
 }

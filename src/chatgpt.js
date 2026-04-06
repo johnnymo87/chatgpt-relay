@@ -470,24 +470,52 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
   }
 
   // Step 2: Wait for stop button to DISAPPEAR (generation ended)
+  // For Deep Research / multi-phase responses, the stop button may cycle
+  // multiple times (e.g., research phase -> writing phase). We wait through
+  // all cycles until the stop button stays hidden.
   console.log('[chatgpt] Waiting for generation to complete...');
-  try {
-    const completeWait = stopBtn.waitFor({ state: 'hidden', timeout });
-    if (networkErrorPromise) {
-      const result = await Promise.race([completeWait, networkErrorPromise]);
-      if (result?.__networkOk) {
-        await completeWait.catch(() => {});
+  let stopButtonCycles = 0;
+
+  while (true) {
+    try {
+      const completeWait = stopBtn.waitFor({ state: 'hidden', timeout });
+      if (networkErrorPromise) {
+        const result = await Promise.race([completeWait, networkErrorPromise]);
+        if (result?.__networkOk) {
+          await completeWait.catch(() => {});
+        }
+      } else {
+        await completeWait;
       }
-    } else {
-      await completeWait;
+    } catch (e) {
+      if (e.message.includes('Network failure')) throw e;
+      console.log('[chatgpt] Stop button wait timed out');
+      break;
     }
-  } catch (e) {
-    if (e.message.includes('Network failure')) throw e;
-    console.log('[chatgpt] Stop button wait timed out');
+
+    stopButtonCycles++;
+    console.log(`[chatgpt] Stop button disappeared (cycle ${stopButtonCycles})`);
+
+    // Brief pause, then check if stop button reappears (multi-phase generation).
+    // Deep Research: research phase ends -> stop button hides -> writing phase
+    // starts -> stop button reappears. We need to wait through all phases.
+    await page.waitForTimeout(2000);
+
+    const reappeared = await stopBtn.isVisible({ timeout: 3000 }).catch(() => false);
+    if (reappeared) {
+      console.log(`[chatgpt] Stop button reappeared — another generation phase starting (cycle ${stopButtonCycles + 1})`);
+      continue;
+    }
+
+    // Stop button stayed hidden — generation is truly complete
+    break;
   }
-  console.log('[chatgpt] Generation complete');
+
+  console.log(`[chatgpt] Generation complete (${stopButtonCycles} stop button cycle${stopButtonCycles !== 1 ? 's' : ''})`);
 
   // Step 3: Get the last assistant message
+  const assistantMsgCount = await page.locator(SELECTORS.assistantMessage).count();
+  console.log(`[chatgpt] Found ${assistantMsgCount} assistant message(s) in DOM`);
   const lastAssistant = page.locator(SELECTORS.assistantMessage).last();
 
   // Wait for it to be visible
@@ -524,6 +552,32 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
     // Check for error states
     await checkErrorStates(page);
 
+    // Check if stop button reappeared (multi-phase generation, e.g. Deep Research).
+    // If generation restarted, wait for it to complete before resuming stabilization.
+    if (await stopBtn.isVisible({ timeout: 100 }).catch(() => false)) {
+      console.log('[chatgpt] Stop button reappeared during stabilization — waiting for new generation phase to complete...');
+      stableMs = 0;
+      emptyTextMs = 0;
+      consecutiveEmptyIterations = 0;
+      lastText = '';
+      loggedEmptyOnce = false;
+
+      try {
+        await stopBtn.waitFor({ state: 'hidden', timeout });
+        console.log('[chatgpt] New generation phase complete');
+        // Re-resolve last assistant message (new message may have been added)
+        const newCount = await page.locator(SELECTORS.assistantMessage).count();
+        console.log(`[chatgpt] Now ${newCount} assistant message(s) in DOM`);
+      } catch (e) {
+        if (e.message.includes('Network failure')) throw e;
+        console.log('[chatgpt] Stop button wait timed out during stabilization');
+      }
+
+      // Re-hydrate after new phase
+      await page.waitForTimeout(2000);
+      continue;
+    }
+
     // Check for "Continue generating" button and click if present
     const continueBtn = page.locator(SELECTORS.continueButton).first();
     if (await continueBtn.isVisible({ timeout: 100 }).catch(() => false)) {
@@ -551,8 +605,10 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
       // Fallback: use page.evaluate() to get text directly from the DOM.
       // Some Chromium versions don't populate text in the Playwright locator
       // while it IS accessible via direct DOM access.
+      // Note: use querySelectorAll + last element to match Playwright's .last()
       currentText = await page.evaluate((sel) => {
-        const el = document.querySelector(sel);
+        const els = document.querySelectorAll(sel);
+        const el = els[els.length - 1];
         if (!el) return '';
         // Try the .markdown container's text specifically
         const markdown = el.querySelector('.markdown');
@@ -565,9 +621,10 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
     }
 
     if (!currentText) {
-      // Fallback: get text from the section turn container
+      // Fallback: get text from the last section turn container
       currentText = await page.evaluate(() => {
-        const section = document.querySelector('section[data-turn="assistant"]');
+        const sections = document.querySelectorAll('section[data-turn="assistant"]');
+        const section = sections[sections.length - 1];
         if (!section) return '';
         // Get text from the message area, skipping UI labels like "ChatGPT said:"
         const msg = section.querySelector('[data-message-author-role="assistant"]');
@@ -624,6 +681,35 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
     if (currentText === lastText) {
       stableMs += 250;
       if (stableMs >= stabilityThreshold) {
+        // Before accepting, check if this looks like an intermediate status
+        // message rather than a real response. Deep Research and thinking
+        // models show short status text (e.g., "Searching...", "Browsing 5
+        // sources...") that stabilizes before the real answer renders.
+        const hasMarkdown = await page.evaluate((sel) => {
+          const el = document.querySelectorAll(sel);
+          const last = el[el.length - 1];
+          return last?.querySelector('.markdown') !== null;
+        }, SELECTORS.assistantMessage).catch(() => true);
+
+        if (!hasMarkdown && currentText.length < 500) {
+          // Suspiciously short text with no markdown container — likely a
+          // thinking/status message. Wait longer for the real response.
+          // Check if more assistant messages appear or if the text changes.
+          console.log(`[chatgpt] Short text (${currentText.length} chars) with no .markdown container — possibly intermediate status, waiting longer...`);
+          stableMs = 0;
+          // Wait a bit and check if a new assistant message appears
+          await page.waitForTimeout(3000);
+          const newCount = await page.locator(SELECTORS.assistantMessage).count();
+          const newText = (await lastAssistant.innerText().catch(() => '')).trim();
+          if (newText !== currentText || newCount > assistantMsgCount) {
+            console.log(`[chatgpt] Text changed or new message appeared after waiting — continuing stabilization`);
+            lastText = '';
+            continue;
+          }
+          // Still the same — accept it (could be a genuinely short response)
+          console.log(`[chatgpt] Text unchanged after extra wait, accepting as final response`);
+        }
+
         console.log(`[chatgpt] Response stabilized (${currentText.length} chars)`);
         return await extractResponseText(page, lastAssistant);
       }

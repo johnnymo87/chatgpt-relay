@@ -103,6 +103,11 @@ async function processRequest(prompt, opts = {}) {
 
   try {
     const response = await sendPromptAndWait(page, prompt, { timeout });
+    // Log a preview for debugging (helps identify truncated/status responses)
+    const preview = response.length > 200
+      ? response.substring(0, 200) + '...'
+      : response;
+    log(`Response preview (${response.length} chars): ${preview.replace(/\n/g, '\\n')}`);
     return response;
   } catch (e) {
     // Hard reset: close page to prevent cascading failures

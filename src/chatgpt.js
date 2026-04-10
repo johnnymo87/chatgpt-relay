@@ -3,7 +3,46 @@
  * Uses Playwright Locators (not ElementHandles) to avoid stale element issues.
  */
 
+import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+
 const CHATGPT_URL = 'https://chatgpt.com';
+const DEBUG_DIR = path.join(os.homedir(), '.chatgpt-relay', 'debug');
+
+/**
+ * Check if a button exists in the DOM and has non-zero dimensions.
+ * This bypasses Playwright's visibility algorithm which can miss buttons
+ * during Extended Thinking (overlay, opacity, or CSS differences).
+ * @param {import('playwright').Page} page
+ * @param {string} selector - CSS selector for the button
+ * @returns {Promise<boolean>}
+ */
+async function isButtonInDOM(page, selector) {
+  return await page.evaluate((sel) => {
+    const btn = document.querySelector(sel);
+    if (!btn) return false;
+    const rect = btn.getBoundingClientRect();
+    return rect.height > 0 && rect.width > 0;
+  }, selector).catch(() => false);
+}
+
+/**
+ * Save a debug screenshot. Best-effort, never throws.
+ * @param {import('playwright').Page} page
+ * @param {string} label - Short label for the screenshot filename
+ */
+async function debugScreenshot(page, label) {
+  try {
+    fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const filePath = path.join(DEBUG_DIR, `${ts}-${label}.png`);
+    await page.screenshot({ path: filePath, fullPage: true });
+    console.log(`[chatgpt] Debug screenshot saved: ${filePath}`);
+  } catch (e) {
+    console.log(`[chatgpt] Debug screenshot failed: ${e.message}`);
+  }
+}
 
 /**
  * Check if a response is a ChatGPT streaming/conversation response.
@@ -470,48 +509,23 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
   }
 
   // Step 2: Wait for stop button to DISAPPEAR (generation ended)
-  // For Deep Research / multi-phase responses, the stop button may cycle
-  // multiple times (e.g., research phase -> writing phase). We wait through
-  // all cycles until the stop button stays hidden.
   console.log('[chatgpt] Waiting for generation to complete...');
-  let stopButtonCycles = 0;
-
-  while (true) {
-    try {
-      const completeWait = stopBtn.waitFor({ state: 'hidden', timeout });
-      if (networkErrorPromise) {
-        const result = await Promise.race([completeWait, networkErrorPromise]);
-        if (result?.__networkOk) {
-          await completeWait.catch(() => {});
-        }
-      } else {
-        await completeWait;
+  try {
+    const completeWait = stopBtn.waitFor({ state: 'hidden', timeout });
+    if (networkErrorPromise) {
+      const result = await Promise.race([completeWait, networkErrorPromise]);
+      if (result?.__networkOk) {
+        await completeWait.catch(() => {});
       }
-    } catch (e) {
-      if (e.message.includes('Network failure')) throw e;
-      console.log('[chatgpt] Stop button wait timed out');
-      break;
+    } else {
+      await completeWait;
     }
-
-    stopButtonCycles++;
-    console.log(`[chatgpt] Stop button disappeared (cycle ${stopButtonCycles})`);
-
-    // Brief pause, then check if stop button reappears (multi-phase generation).
-    // Deep Research: research phase ends -> stop button hides -> writing phase
-    // starts -> stop button reappears. We need to wait through all phases.
-    await page.waitForTimeout(2000);
-
-    const reappeared = await stopBtn.isVisible({ timeout: 3000 }).catch(() => false);
-    if (reappeared) {
-      console.log(`[chatgpt] Stop button reappeared — another generation phase starting (cycle ${stopButtonCycles + 1})`);
-      continue;
-    }
-
-    // Stop button stayed hidden — generation is truly complete
-    break;
+  } catch (e) {
+    if (e.message.includes('Network failure')) throw e;
+    console.log('[chatgpt] Stop button wait timed out');
   }
 
-  console.log(`[chatgpt] Generation complete (${stopButtonCycles} stop button cycle${stopButtonCycles !== 1 ? 's' : ''})`);
+  console.log('[chatgpt] Generation complete (stop button hidden)');
 
   // Step 3: Get the last assistant message
   const assistantMsgCount = await page.locator(SELECTORS.assistantMessage).count();
@@ -538,6 +552,8 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
   let stableMs = 0;
   let emptyTextMs = 0;
   let consecutiveEmptyIterations = 0;
+  let sendBtnNotReadyMs = 0; // How long we've been waiting with stable text but no send button
+  let sendBtnScreenshotTaken = false;
   // After this many consecutive all-empty iterations (~30s of 250ms polling,
   // plus the 2s hydration delay = ~32s total), give up and throw.
   // This is deliberately generous to accommodate slow rendering, extended
@@ -552,28 +568,16 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
     // Check for error states
     await checkErrorStates(page);
 
-    // Check if stop button reappeared (multi-phase generation, e.g. Deep Research).
-    // If generation restarted, wait for it to complete before resuming stabilization.
-    if (await stopBtn.isVisible({ timeout: 100 }).catch(() => false)) {
-      console.log('[chatgpt] Stop button reappeared during stabilization — waiting for new generation phase to complete...');
+    // Check if stop button is in the DOM (multi-phase generation, Extended Thinking).
+    // Uses direct DOM query because Playwright's isVisible/waitFor can miss the
+    // stop button during Extended Thinking (CSS overlay/opacity differences).
+    if (await isButtonInDOM(page, '[data-testid="stop-button"]')) {
+      // Stop button is present and has dimensions — generation in progress.
+      // Don't log every iteration (250ms), just reset and keep waiting.
       stableMs = 0;
       emptyTextMs = 0;
       consecutiveEmptyIterations = 0;
-      lastText = '';
-      loggedEmptyOnce = false;
-
-      try {
-        await stopBtn.waitFor({ state: 'hidden', timeout });
-        console.log('[chatgpt] New generation phase complete');
-        // Re-resolve last assistant message (new message may have been added)
-        const newCount = await page.locator(SELECTORS.assistantMessage).count();
-        console.log(`[chatgpt] Now ${newCount} assistant message(s) in DOM`);
-      } catch (e) {
-        if (e.message.includes('Network failure')) throw e;
-        console.log('[chatgpt] Stop button wait timed out during stabilization');
-      }
-
-      // Re-hydrate after new phase
+      sendBtnNotReadyMs = 0;
       await page.waitForTimeout(2000);
       continue;
     }
@@ -681,40 +685,68 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
     if (currentText === lastText) {
       stableMs += 250;
       if (stableMs >= stabilityThreshold) {
-        // Before accepting, check if this looks like an intermediate status
-        // message rather than a real response. Deep Research and thinking
-        // models show short status text (e.g., "Searching...", "Browsing 5
-        // sources...") that stabilizes before the real answer renders.
-        const hasMarkdown = await page.evaluate((sel) => {
-          const el = document.querySelectorAll(sel);
-          const last = el[el.length - 1];
-          return last?.querySelector('.markdown') !== null;
-        }, SELECTORS.assistantMessage).catch(() => true);
+        // Text has been stable for 1.5s. Check button state via direct DOM
+        // queries (page.evaluate). Playwright's waitFor/isVisible cannot
+        // detect the stop button during Extended Thinking — it's in the DOM
+        // with dimensions but Playwright considers it not visible (likely
+        // due to CSS overlay or opacity).
+        const stopInDOM = await isButtonInDOM(page, '[data-testid="stop-button"]');
 
-        if (!hasMarkdown && currentText.length < 500) {
-          // Suspiciously short text with no markdown container — likely a
-          // thinking/status message. Wait longer for the real response.
-          // Check if more assistant messages appear or if the text changes.
-          console.log(`[chatgpt] Short text (${currentText.length} chars) with no .markdown container — possibly intermediate status, waiting longer...`);
+        if (stopInDOM) {
+          // Stop button in DOM with dimensions — generation in progress.
           stableMs = 0;
-          // Wait a bit and check if a new assistant message appears
-          await page.waitForTimeout(3000);
-          const newCount = await page.locator(SELECTORS.assistantMessage).count();
-          const newText = (await lastAssistant.innerText().catch(() => '')).trim();
-          if (newText !== currentText || newCount > assistantMsgCount) {
-            console.log(`[chatgpt] Text changed or new message appeared after waiting — continuing stabilization`);
-            lastText = '';
-            continue;
-          }
-          // Still the same — accept it (could be a genuinely short response)
-          console.log(`[chatgpt] Text unchanged after extra wait, accepting as final response`);
+          sendBtnNotReadyMs = 0;
+          await page.waitForTimeout(2000);
+          continue;
         }
 
-        console.log(`[chatgpt] Response stabilized (${currentText.length} chars)`);
-        return await extractResponseText(page, lastAssistant);
+        // Stop button gone. Check send button as confidence signal.
+        const sendInDOM = await isButtonInDOM(page, '[data-testid="send-button"]');
+
+        if (sendInDOM) {
+          console.log(`[chatgpt] Response stabilized (${currentText.length} chars, send button in DOM)`);
+          return await extractResponseText(page, lastAssistant);
+        }
+
+        // Neither button in DOM. This is unusual — might be a brief gap
+        // or the send button has a different selector. Wait with fallback.
+        sendBtnNotReadyMs += stabilityThreshold;
+
+        if (!sendBtnScreenshotTaken) {
+          const preview = currentText.length > 100
+            ? currentText.substring(0, 100) + '...'
+            : currentText;
+          console.log(`[chatgpt] Text stable (${currentText.length} chars), stop button gone, send button not found. Preview: ${preview.replace(/\n/g, '\\n')}`);
+          const btnDiag = await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button')).slice(-10);
+            return btns.map(b => ({
+              testid: b.getAttribute('data-testid'),
+              ariaLabel: b.getAttribute('aria-label'),
+              text: b.innerText?.trim().substring(0, 50),
+              dims: `${Math.round(b.getBoundingClientRect().width)}x${Math.round(b.getBoundingClientRect().height)}`,
+            }));
+          }).catch(() => []);
+          console.log(`[chatgpt] Last 10 buttons in DOM: ${JSON.stringify(btnDiag)}`);
+          await debugScreenshot(page, 'no-stop-no-send');
+          sendBtnScreenshotTaken = true;
+        }
+
+        // Accept after 30s with no stop button and no send button.
+        // This is shorter than before because the stop button check is now
+        // reliable — if it's truly gone, generation is likely done.
+        const maxNoButtonWaitMs = 30000;
+        if (sendBtnNotReadyMs >= maxNoButtonWaitMs) {
+          console.log(`[chatgpt] No buttons found after ${Math.round(sendBtnNotReadyMs / 1000)}s — accepting response (${currentText.length} chars)`);
+          return await extractResponseText(page, lastAssistant);
+        }
+
+        stableMs = 0;
+        await page.waitForTimeout(2000);
+        continue;
       }
     } else {
       stableMs = 0;
+      sendBtnNotReadyMs = 0; // Text changed — reset the wait timer
       lastText = currentText;
     }
 
@@ -723,6 +755,7 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
 
   // Timeout - try all extraction methods before giving up
   console.log('[chatgpt] Timeout reached, trying final extraction...');
+  await debugScreenshot(page, 'timeout');
   const finalText = await extractResponseText(page, lastAssistant).catch(() => '');
   if (finalText) {
     console.log(`[chatgpt] Timeout but have partial response (${finalText.length} chars)`);

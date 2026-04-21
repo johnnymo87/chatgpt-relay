@@ -80,3 +80,36 @@ test('isLoggedIn returns false when login button visible even if indicator also 
   };
   assert.strictEqual(await isLoggedIn(page), false);
 });
+
+test('loginButton selector does NOT include broad a[href*="/auth"] match', async () => {
+  // Regression: deep-research responses can include citation anchors with
+  // /auth in the href (e.g., GitHub Docs links to /auth pages). Previously
+  // these false-matched the loginButton selector and caused isLoggedIn to
+  // return false AFTER a successful long generation, throwing a spurious
+  // "Not logged in" error. The compound loginButton selector must not
+  // include any anchor selector that matches arbitrary content links.
+  // We re-import the source as a string and assert.
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const src = readFileSync(
+    fileURLToPath(new URL('./chatgpt.js', import.meta.url)),
+    'utf8'
+  );
+
+  // Find the loginButton: [ ... ] block and inspect its contents.
+  const match = src.match(/loginButton:\s*\[([\s\S]*?)\]\.join/);
+  assert.ok(match, 'Could not locate loginButton selector array in source');
+  const block = match[1];
+
+  // Must not contain the bare a[href*="/auth"] selector that caused the
+  // false-positive. (Allow comments mentioning it for documentation.)
+  // Strip line comments before checking.
+  const codeOnly = block.split('\n')
+    .filter(line => !line.trim().startsWith('//'))
+    .join('\n');
+  assert.ok(
+    !/a\[href\*=["']\/auth["']\]/.test(codeOnly),
+    'loginButton must not include a[href*="/auth"] -- it false-matches ' +
+    'citation anchors in deep-research responses'
+  );
+});

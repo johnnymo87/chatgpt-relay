@@ -187,10 +187,23 @@ const SELECTORS = {
 
   copyTurnButton: '[data-testid="copy-turn-action-button"]',
 
+  // Selectors that identify a real ChatGPT login button in the page chrome
+  // (header / OAuth dialog), NOT in assistant message content.
+  //
+  // IMPORTANT: a[href*="/auth"] was REMOVED here -- it false-matched
+  // citation anchors in deep-research responses (e.g., GitHub Docs links
+  // to /auth/* pages), causing isLoggedIn to spuriously return false
+  // AFTER a successful long generation. The URL check at the top of
+  // isLoggedIn already detects redirects to /auth pages, so a header-link
+  // selector is redundant.
+  //
+  // Button text selectors are kept narrow (literal "Log in" / "Sign in")
+  // because ChatGPT renders citation/quote links as <a>, not <button>, so
+  // a real assistant response containing those phrases as plain text in a
+  // citation will not match a <button>.
   loginButton: [
     'button:has-text("Log in")',
     'button:has-text("Sign in")',
-    'a[href*="/auth"]'
   ].join(', '),
 
   // Positive indicators that the user is logged in.
@@ -781,6 +794,7 @@ export async function isLoggedIn(page, { timeout = 15000 } = {}) {
   // Check for logged out state (URL redirect to auth)
   const url = page.url();
   if (url.includes('/auth') || url.includes('login.openai.com')) {
+    await logIsLoggedInDiagnostics(page, `auth-url:${url}`).catch(() => {});
     return false;
   }
 
@@ -801,20 +815,71 @@ export async function isLoggedIn(page, { timeout = 15000 } = {}) {
     ]);
 
     if (winner === LOGIN_BTN) {
+      await logIsLoggedInDiagnostics(page, 'login-button-won').catch(() => {});
       return false;
     }
 
     // Indicator appeared first, but double-check login button isn't also
     // visible (e.g., transient UI state).
     if (await loginBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+      await logIsLoggedInDiagnostics(page, 'login-button-also-visible').catch(() => {});
       return false;
     }
 
     return true;
   } catch {
-    // Neither appeared within timeout -- ambiguous state, not logged in.
+    // Neither appeared within timeout -- ambiguous state.
+    // Diagnostic: log DOM-level state of the indicator selectors so we can
+    // tell whether Playwright's visibility check is missing them (same bug
+    // class as the stop-button issue fixed in commit 41990f3).
+    await logIsLoggedInDiagnostics(page, 'waitFor-timeout').catch(() => {});
     return false;
   }
+}
+
+/**
+ * Log diagnostic info when isLoggedIn returns false from the timeout branch.
+ * Best-effort, never throws. Captures Playwright vs. raw-DOM visibility for
+ * the logged-in indicator selectors.
+ * @param {import('playwright').Page} page
+ * @param {string} reason
+ */
+async function logIsLoggedInDiagnostics(page, reason) {
+  const allSelectors = [
+    // logged-in indicators
+    'nav[aria-label="Chat history"]',
+    '#prompt-textarea',
+    // login-button candidates (the SELECTORS.loginButton compound)
+    'button:has-text("Log in")',
+    'button:has-text("Sign in")',
+    'a[href*="/auth"]',
+  ];
+  const url = page.url();
+  console.log(`[chatgpt] isLoggedIn=false (${reason}) url=${url}`);
+  for (const sel of allSelectors) {
+    const playwrightVisible = await page.locator(sel).first()
+      .isVisible({ timeout: 100 }).catch(() => false);
+    const domState = await page.evaluate((s) => {
+      // CSS :has-text() is Playwright-only; for raw-DOM fallback, only
+      // straight CSS selectors will be queried successfully.
+      let el;
+      try { el = document.querySelector(s); } catch { return { invalidCss: true }; }
+      if (!el) return { present: false };
+      const rect = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      return {
+        present: true,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        display: cs.display,
+        visibility: cs.visibility,
+        opacity: cs.opacity,
+        text: (el.innerText || el.textContent || '').slice(0, 60),
+      };
+    }, sel).catch((e) => ({ error: e.message }));
+    console.log(`[chatgpt]   ${sel}: playwrightVisible=${playwrightVisible} dom=${JSON.stringify(domState)}`);
+  }
+  await debugScreenshot(page, `isLoggedIn-false-${reason}`).catch(() => {});
 }
 
 /**

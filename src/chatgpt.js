@@ -281,11 +281,8 @@ export async function getOrCreateChatGPTPage(context) {
  * @param {import('playwright').Page} page
  */
 export async function navigateToNewChat(page) {
-  const url = page.url();
-  if (url !== CHATGPT_URL && url !== `${CHATGPT_URL}/`) {
-    await page.goto(CHATGPT_URL);
-    await page.waitForLoadState('domcontentloaded');
-  }
+  await page.goto(CHATGPT_URL);
+  await page.waitForLoadState('domcontentloaded');
 
   // Wait for the composer to be interactive after navigation.
   // ChatGPT's SPA re-renders the composer after route changes, which can

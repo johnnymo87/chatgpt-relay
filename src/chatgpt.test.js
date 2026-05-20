@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { isLoggedIn } from './chatgpt.js';
+import { isLoggedIn, navigateToNewChat } from './chatgpt.js';
 
 /**
  * Create a mock Playwright page object for testing isLoggedIn.
@@ -112,4 +112,27 @@ test('loginButton selector does NOT include broad a[href*="/auth"] match', async
     'loginButton must not include a[href*="/auth"] -- it false-matches ' +
     'citation anchors in deep-research responses'
   );
+});
+
+test('navigateToNewChat forces root navigation even when already at ChatGPT root', async () => {
+  let gotoCount = 0;
+  const page = {
+    url: () => 'https://chatgpt.com/',
+    goto: async (url) => {
+      gotoCount++;
+      assert.strictEqual(url, 'https://chatgpt.com');
+    },
+    waitForLoadState: async (state) => {
+      assert.strictEqual(state, 'domcontentloaded');
+    },
+    locator: () => ({
+      first: () => ({
+        waitFor: async () => {}
+      })
+    })
+  };
+
+  await navigateToNewChat(page);
+
+  assert.strictEqual(gotoCount, 1);
 });

@@ -8,13 +8,14 @@ import os from 'node:os';
  * @param {number} opts.ppid - Parent process ID
  * @param {string} opts.tmux - TMUX env var
  * @param {string} opts.tmuxPane - TMUX_PANE env var
+ * @param {string} opts.homeDir - Home directory containing Claude runtime files
  * @returns {string|null} Session ID or null
  */
 export function discoverSessionId(opts = {}) {
   const ppid = opts.ppid ?? process.ppid;
   const tmux = opts.tmux ?? process.env.TMUX;
   const tmuxPane = opts.tmuxPane ?? process.env.TMUX_PANE;
-  const homeDir = os.homedir();
+  const homeDir = opts.homeDir ?? os.homedir();
 
   // Try ppid-map first
   const ppidMapPath = path.join(homeDir, '.claude/runtime/ppid-map', String(ppid));

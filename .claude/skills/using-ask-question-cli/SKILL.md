@@ -24,17 +24,21 @@ ask-question CLI ──► HTTP POST /ask ──► ask-question-server (daemon)
 ## Prerequisites
 
 1. **Node.js** installed
-2. **Playwright** with Chromium (`npm install` downloads it)
-3. **npm link** run in the chatgpt-relay directory
+2. **Playwright** dependencies installed with `npm install`
+3. Repo `devenv`/`direnv` shell active so local `ask-question*` commands are on `PATH`
 
 ## Setup (One-Time)
 
 ```bash
 cd ~/Code/chatgpt-relay
 npm install
-npm link
 ask-question-login  # Opens browser, log into ChatGPT
 ```
+
+Do not use `npm link` in the Nix/devenv setup. The repo provides local
+`devenv` wrappers for `ask-question`, `ask-question-server`, and
+`ask-question-login`. If the shell is not already activated, run commands as
+`devenv shell -- ask-question-login`.
 
 ## Starting the Daemon
 

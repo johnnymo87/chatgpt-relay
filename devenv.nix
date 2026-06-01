@@ -8,9 +8,14 @@ let
   chromiumEntry = builtins.head (builtins.filter (b: b.name == "chromium") browsersJson.browsers);
   chromiumRev = chromiumEntry.revision;
 
-  # Construct path to chromium executable
-  # On ARM64 Linux: chromium-XXXX/chrome-linux/chrome
-  chromiumExe = "${pwBrowsers}/chromium-${chromiumRev}/chrome-linux/chrome";
+  # Construct platform-specific path to chromium executable
+  chromiumExe = if pkgs.stdenv.isDarwin then
+    let
+      dirName = if pkgs.stdenv.hostPlatform.isAarch64 then "chrome-mac-arm64" else "chrome-mac";
+    in
+      "${pwBrowsers}/chromium-${chromiumRev}/${dirName}/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+  else
+    "${pwBrowsers}/chromium-${chromiumRev}/chrome-linux/chrome";
 in
 {
   languages.javascript = {
@@ -35,6 +40,18 @@ in
     # Direct path to Nix-provided Chromium executable
     PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH = chromiumExe;
   };
+
+  scripts."ask-question".exec = ''
+    node "$DEVENV_ROOT/src/cli.js" "$@"
+  '';
+
+  scripts."ask-question-server".exec = ''
+    node "$DEVENV_ROOT/src/server.js" "$@"
+  '';
+
+  scripts."ask-question-login".exec = ''
+    node "$DEVENV_ROOT/src/login.js" "$@"
+  '';
 
   dotenv.enable = true;
 

@@ -1,7 +1,12 @@
 node_modules/
 *.log
 .DS_Store
+Session.vim
 user-data/
+
+# Beads local state
+.beads/backup/
+.beads/embeddeddolt/
 
 # Devenv
 .devenv/

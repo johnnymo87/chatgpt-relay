@@ -4,9 +4,9 @@ node_modules/
 Session.vim
 user-data/
 
-# Beads local state
-.beads/backup/
-.beads/embeddeddolt/
+# beads tracker (git-free/stealth: data in dolt remote refs/dolt/data)
+.beads/
+.beads-credential-key
 
 # Devenv
 .devenv/

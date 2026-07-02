@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { isLoggedIn, navigateToNewChat } from './chatgpt.js';
+import {
+  isLoggedIn,
+  loginStatus,
+  ensureLoggedInAtStartup,
+  navigateToNewChat,
+} from './chatgpt.js';
 
 /**
  * Create a mock Playwright page object for testing isLoggedIn.
@@ -40,6 +45,49 @@ function mockPage({ url = 'https://chatgpt.com/', winner = 'neither' } = {}) {
       };
     }
   };
+}
+
+/**
+ * Like mockPage, but its "winner" can change across page.reload() calls so we
+ * can exercise the startup retry loop. `winners` is the sequence of states;
+ * each reload() advances to the next entry (clamped to the last).
+ *
+ * @param {object} opts
+ * @param {string} opts.url
+ * @param {Array<'login'|'loggedIn'|'neither'>} opts.winners
+ */
+function mockStatefulPage({ url = 'https://chatgpt.com/', winners = ['neither'] } = {}) {
+  let idx = 0;
+  const page = {
+    reloadCount: 0,
+    url: () => url,
+    reload: async () => {
+      page.reloadCount++;
+      idx = Math.min(idx + 1, winners.length - 1);
+    },
+    locator: (selector) => {
+      const isLoginSelector = selector.includes('Log in') ||
+        selector.includes('Sign in') || selector.includes('/auth');
+      return {
+        first: () => ({
+          waitFor: ({ timeout } = {}) => {
+            const winner = winners[idx];
+            if (isLoginSelector && winner === 'login') return Promise.resolve();
+            if (!isLoginSelector && winner === 'loggedIn') return Promise.resolve();
+            return new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Timeout')), 50)
+            );
+          },
+          isVisible: async () => {
+            const winner = winners[idx];
+            if (isLoginSelector) return winner === 'login';
+            return winner === 'loggedIn';
+          }
+        })
+      };
+    }
+  };
+  return page;
 }
 
 test('isLoggedIn returns false when URL contains /auth', async () => {
@@ -112,6 +160,56 @@ test('loginButton selector does NOT include broad a[href*="/auth"] match', async
     'loginButton must not include a[href*="/auth"] -- it false-matches ' +
     'citation anchors in deep-research responses'
   );
+});
+
+// --- loginStatus: distinguishes logged-out from ambiguous/unknown ---
+
+test('loginStatus returns "logged-out" when URL is an auth redirect', async () => {
+  const page = mockPage({ url: 'https://auth0.openai.com/auth/login' });
+  assert.strictEqual(await loginStatus(page), 'logged-out');
+});
+
+test('loginStatus returns "logged-out" when login button appears', async () => {
+  const page = mockPage({ winner: 'login' });
+  assert.strictEqual(await loginStatus(page), 'logged-out');
+});
+
+test('loginStatus returns "logged-in" when logged-in indicator appears', async () => {
+  const page = mockPage({ winner: 'loggedIn' });
+  assert.strictEqual(await loginStatus(page), 'logged-in');
+});
+
+test('loginStatus returns "unknown" when neither signal appears (timeout)', async () => {
+  const page = mockPage({ winner: 'neither' });
+  assert.strictEqual(await loginStatus(page), 'unknown');
+});
+
+// --- ensureLoggedInAtStartup: retries on ambiguous, fails fast on logged-out ---
+
+test('ensureLoggedInAtStartup returns true immediately when logged in (no reload)', async () => {
+  const page = mockStatefulPage({ winners: ['loggedIn'] });
+  assert.strictEqual(await ensureLoggedInAtStartup(page), true);
+  assert.strictEqual(page.reloadCount, 0);
+});
+
+test('ensureLoggedInAtStartup fails fast when definitively logged out (no reload)', async () => {
+  const page = mockStatefulPage({ winners: ['login'] });
+  assert.strictEqual(await ensureLoggedInAtStartup(page, { attempts: 3 }), false);
+  assert.strictEqual(page.reloadCount, 0);
+});
+
+test('ensureLoggedInAtStartup retries on "unknown" and succeeds after a reload', async () => {
+  // Slow load: ambiguous on first check, hydrated (logged in) after one reload.
+  const page = mockStatefulPage({ winners: ['neither', 'loggedIn'] });
+  assert.strictEqual(await ensureLoggedInAtStartup(page, { attempts: 3 }), true);
+  assert.strictEqual(page.reloadCount, 1);
+});
+
+test('ensureLoggedInAtStartup returns false after exhausting attempts when always ambiguous', async () => {
+  const page = mockStatefulPage({ winners: ['neither'] });
+  assert.strictEqual(await ensureLoggedInAtStartup(page, { attempts: 3 }), false);
+  // Reloads happen between attempts only: after attempt 1 and 2, not after 3.
+  assert.strictEqual(page.reloadCount, 2);
 });
 
 test('navigateToNewChat forces root navigation even when already at ChatGPT root', async () => {

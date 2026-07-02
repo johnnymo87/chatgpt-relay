@@ -783,16 +783,20 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
 }
 
 /**
- * Check if the user is logged in to ChatGPT.
+ * Determine the ChatGPT login state, distinguishing a *definite* logout from
+ * an *ambiguous* state (neither signal appeared within the timeout -- typically
+ * a slow/incomplete page load that hasn't hydrated yet).
+ *
  * @param {import('playwright').Page} page
- * @returns {Promise<boolean>}
+ * @param {{timeout?: number}} [opts]
+ * @returns {Promise<'logged-in'|'logged-out'|'unknown'>}
  */
-export async function isLoggedIn(page, { timeout = 15000 } = {}) {
+export async function loginStatus(page, { timeout = 15000 } = {}) {
   // Check for logged out state (URL redirect to auth)
   const url = page.url();
   if (url.includes('/auth') || url.includes('login.openai.com')) {
     await logIsLoggedInDiagnostics(page, `auth-url:${url}`).catch(() => {});
-    return false;
+    return 'logged-out';
   }
 
   // Race: wait for either the login button or a logged-in indicator to appear.
@@ -813,25 +817,73 @@ export async function isLoggedIn(page, { timeout = 15000 } = {}) {
 
     if (winner === LOGIN_BTN) {
       await logIsLoggedInDiagnostics(page, 'login-button-won').catch(() => {});
-      return false;
+      return 'logged-out';
     }
 
     // Indicator appeared first, but double-check login button isn't also
     // visible (e.g., transient UI state).
     if (await loginBtn.isVisible({ timeout: 500 }).catch(() => false)) {
       await logIsLoggedInDiagnostics(page, 'login-button-also-visible').catch(() => {});
-      return false;
+      return 'logged-out';
     }
 
-    return true;
+    return 'logged-in';
   } catch {
-    // Neither appeared within timeout -- ambiguous state.
+    // Neither appeared within timeout -- ambiguous state (not the same as a
+    // confirmed logout). Callers may choose to reload and retry.
     // Diagnostic: log DOM-level state of the indicator selectors so we can
     // tell whether Playwright's visibility check is missing them (same bug
     // class as the stop-button issue fixed in commit 41990f3).
     await logIsLoggedInDiagnostics(page, 'waitFor-timeout').catch(() => {});
-    return false;
+    return 'unknown';
   }
+}
+
+/**
+ * Check if the user is logged in to ChatGPT.
+ *
+ * Thin boolean wrapper over {@link loginStatus}: any non-'logged-in' state
+ * (including the ambiguous 'unknown') is treated as not logged in. This keeps
+ * the strict mid-request semantics used by {@link assertLoggedIn}.
+ *
+ * @param {import('playwright').Page} page
+ * @param {{timeout?: number}} [opts]
+ * @returns {Promise<boolean>}
+ */
+export async function isLoggedIn(page, opts) {
+  return (await loginStatus(page, opts)) === 'logged-in';
+}
+
+/**
+ * Verify login at server startup, tolerating slow connections.
+ *
+ * On a weak connection the ChatGPT SPA may not hydrate within a single
+ * login-check window, leaving {@link loginStatus} in the 'unknown' state.
+ * Rather than hard-failing on the first ambiguous check, reload the page and
+ * retry. A definite 'logged-out' (login button visible / auth redirect) fails
+ * fast -- reloading won't recover an expired session.
+ *
+ * @param {import('playwright').Page} page
+ * @param {{attempts?: number, timeout?: number}} [opts]
+ * @returns {Promise<boolean>} true if logged in; false if definitively logged
+ *   out or still ambiguous after exhausting attempts.
+ */
+export async function ensureLoggedInAtStartup(page, { attempts = 3, timeout = 30000 } = {}) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const status = await loginStatus(page, { timeout });
+    if (status === 'logged-in') return true;
+    if (status === 'logged-out') return false;
+
+    // status === 'unknown' -- likely a slow/incomplete load. Reload and retry
+    // while attempts remain.
+    if (attempt < attempts) {
+      console.log(`[chatgpt] Login state ambiguous (attempt ${attempt}/${attempts}); reloading and retrying...`);
+      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+    } else {
+      console.log(`[chatgpt] Login state still ambiguous after ${attempts} attempts.`);
+    }
+  }
+  return false;
 }
 
 /**

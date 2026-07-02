@@ -12,7 +12,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { navigateToNewChat, sendPromptAndWait, isLoggedIn } from './chatgpt.js';
+import { navigateToNewChat, sendPromptAndWait, ensureLoggedInAtStartup } from './chatgpt.js';
 
 const STORAGE_STATE_FILE = process.env.ASK_QUESTION_STORAGE_STATE_FILE ||
   path.join(os.homedir(), '.chatgpt-relay/storage-state.json');
@@ -333,8 +333,10 @@ async function main() {
   await page.waitForLoadState('domcontentloaded');
   console.log('[ask-question-server] ChatGPT page opened.');
 
-  // Verify we're logged in
-  if (!(await isLoggedIn(page))) {
+  // Verify we're logged in. On weak connections the SPA can be slow to
+  // hydrate, so retry with reloads before giving up rather than hard-failing
+  // on the first ambiguous check. A confirmed logout still fails fast.
+  if (!(await ensureLoggedInAtStartup(page))) {
     console.error('[ask-question-server] Error: Not logged in to ChatGPT.');
     console.error('[ask-question-server] Session may have expired. Run "ask-question-login" to log in again.');
     await browser.close();

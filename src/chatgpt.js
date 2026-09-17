@@ -355,6 +355,48 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
 }
 
 /**
+ * Read the full text of the LAST assistant turn.
+ *
+ * Runs in the BROWSER (passed to page.evaluate), and is exported only so it
+ * can be unit-tested against a DOM stub. It must stay self-contained: no
+ * closures over module scope, because Playwright serializes it to a string.
+ *
+ * Why it joins chunks: ChatGPT renders a long response as MULTIPLE
+ * `[data-message-author-role="assistant"]` elements inside ONE
+ * `section[data-turn="assistant"]`. A 47k-char answer was observed split
+ * across 9 such elements. Reading only `.last()` therefore returned just the
+ * tail of the answer (e.g. starting at "10. ..."), silently dropping the
+ * head. Always aggregate every chunk in the turn.
+ *
+ * @returns {string}
+ */
+export function readAssistantTurnText() {
+  const sections = document.querySelectorAll('section[data-turn="assistant"]');
+  const section = sections[sections.length - 1];
+  if (!section) return '';
+
+  const msgs = section.querySelectorAll('[data-message-author-role="assistant"]');
+  const parts = [];
+  for (const msg of msgs) {
+    const markdown = msg.querySelector('.markdown');
+    const el = markdown || msg;
+    const text = (el.innerText || el.textContent || '').trim();
+    if (text) parts.push(text);
+  }
+  return parts.join('\n\n').trim();
+}
+
+/**
+ * Locator for the last assistant turn container (holds all message chunks
+ * of a single response plus its action bar with the copy button).
+ * @param {import('playwright').Page} page
+ * @returns {import('playwright').Locator}
+ */
+function lastAssistantTurn(page) {
+  return page.locator(SELECTORS.assistantTurn).last();
+}
+
+/**
  * Safely read clipboard text, returning empty string on failure.
  * @param {import('playwright').Page} page
  * @returns {Promise<string>}
@@ -377,12 +419,15 @@ async function readClipboardText(page) {
  * @param {import('playwright').Locator} messageLocator - The assistant message locator
  * @returns {Promise<string>}
  */
-async function extractViaCopyButton(page, messageLocator) {
-  // Navigate up to the turn container (section) that holds both message and action buttons
-  // ChatGPT DOM (March 2026): section[data-testid][data-turn] > ... > div[data-message-author-role] (message)
-  //                                                           > div (action bar with copy button)
-  // Note: previously used <article>, OpenAI changed to <section> circa early 2026.
-  const turnContainer = messageLocator.locator('xpath=ancestor::section[@data-testid]');
+async function extractViaCopyButton(page) {
+  // The turn container (section) holds every message chunk of the response
+  // plus the action bar with the copy button. Copying the TURN (not a single
+  // message element) is what makes this the only extraction path guaranteed
+  // to include the whole answer when ChatGPT splits it across chunks.
+  // ChatGPT DOM (Sept 2026): section[data-testid][data-turn="assistant"]
+  //   > N × div[data-message-author-role="assistant"]
+  //   > div (action bar with copy button)
+  const turnContainer = lastAssistantTurn(page);
 
   // Check if turn container was found (DOM structure may have changed)
   if (await turnContainer.count() === 0) {
@@ -392,10 +437,13 @@ async function extractViaCopyButton(page, messageLocator) {
   const copyBtn = turnContainer.locator(SELECTORS.copyTurnButton);
 
   // Hover the turn container to reveal action buttons (they have pointer-events:none until hover)
-  await turnContainer.hover({ timeout: 2000 }).catch(() => {});
+  await turnContainer.hover({ timeout: 3000 }).catch(() => {});
 
-  // Use waitFor, not isVisible(timeout) - timeout is ignored in isVisible
-  await copyBtn.waitFor({ state: 'visible', timeout: 1500 });
+  // Use waitFor, not isVisible(timeout) - timeout is ignored in isVisible.
+  // Generous timeout: this is the ONLY path that reliably returns the full
+  // response text, so give it room on a busy page rather than dropping to
+  // the lossier innerText fallback.
+  await copyBtn.waitFor({ state: 'visible', timeout: 5000 });
 
   // Ensure document focus (helps with Clipboard API in some cases)
   await page.click('body', { position: { x: 5, y: 5 }, timeout: 1000 }).catch(() => {});
@@ -404,7 +452,7 @@ async function extractViaCopyButton(page, messageLocator) {
   const before = await readClipboardText(page);
 
   // Use force:true to bypass pointer-events:none overlay on action bar
-  await copyBtn.click({ timeout: 1500, force: true });
+  await copyBtn.click({ timeout: 3000, force: true });
 
   // Poll until clipboard changes (more robust than fixed wait)
   const handle = await page.waitForFunction(
@@ -419,7 +467,7 @@ async function extractViaCopyButton(page, messageLocator) {
       }
     },
     before,
-    { timeout: 2000 }
+    { timeout: 5000 }
   );
 
   const copied = await handle.jsonValue();
@@ -441,15 +489,23 @@ async function extractViaCopyButton(page, messageLocator) {
 async function extractResponseText(page, messageLocator) {
   // Try clipboard extraction (best effort)
   try {
-    const text = await extractViaCopyButton(page, messageLocator);
+    const text = await extractViaCopyButton(page);
     return text;
   } catch (e) {
-    console.log(`[chatgpt] Copy button extraction failed: ${e.message}, falling back to innerText`);
+    console.log(`[chatgpt] Copy button extraction failed: ${e.message}, falling back to turn text`);
   }
 
-  // Fallback to innerText
+  // Fallback: read every message chunk of the turn (NOT just the last one --
+  // see readAssistantTurnText for why).
+  const turnText = (await page.evaluate(readAssistantTurnText).catch(() => '')).trim();
+  if (turnText) {
+    console.log(`[chatgpt] Extracted via turn text (${turnText.length} chars)`);
+    return turnText;
+  }
+
+  // Last resort: single message element innerText (may be a partial chunk).
   const text = await messageLocator.innerText();
-  console.log(`[chatgpt] Extracted via innerText (${text.length} chars)`);
+  console.log(`[chatgpt] Extracted via single-message innerText (${text.length} chars) -- may be partial`);
   return text.trim();
 }
 
@@ -573,6 +629,7 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
   const emptyTextFallbackMs = 10000; // Try copy button after 10s of empty text
   let loggedEmptyOnce = false;
   let loggedInnerTextError = false;
+  let loggedTurnTextError = false;
 
   while (Date.now() - startTime < timeout) {
     // Check for error states
@@ -603,17 +660,28 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
       continue;
     }
 
-    // Try multiple extraction strategies, from most specific to broadest:
-    // 1. Message element innerText (Playwright locator)
-    // 2. DOM evaluate on the message element (bypasses Playwright rendering)
-    // 3. Section-level text extraction (gets all text in the turn)
-    let currentText = (await lastAssistant.innerText().catch(e => {
-      if (!loggedInnerTextError) {
-        console.warn(`[chatgpt] innerText failed: ${e.message}`);
-        loggedInnerTextError = true;
+    // Try multiple extraction strategies, from most complete to narrowest:
+    // 1. Whole-turn text (joins every message chunk -- the only one that is
+    //    correct when ChatGPT splits a long response across chunks)
+    // 2. Message element innerText (Playwright locator; last chunk only)
+    // 3. DOM evaluate on the message element (bypasses Playwright rendering)
+    let currentText = (await page.evaluate(readAssistantTurnText).catch(e => {
+      if (!loggedTurnTextError) {
+        console.warn(`[chatgpt] turn text read failed: ${e.message}`);
+        loggedTurnTextError = true;
       }
       return '';
     })).trim();
+
+    if (!currentText) {
+      currentText = (await lastAssistant.innerText().catch(e => {
+        if (!loggedInnerTextError) {
+          console.warn(`[chatgpt] innerText failed: ${e.message}`);
+          loggedInnerTextError = true;
+        }
+        return '';
+      })).trim();
+    }
 
     if (!currentText) {
       // Fallback: use page.evaluate() to get text directly from the DOM.
@@ -632,23 +700,6 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
         }
         return el.innerText?.trim() || '';
       }, SELECTORS.assistantMessage).catch(() => '');
-    }
-
-    if (!currentText) {
-      // Fallback: get text from the last section turn container
-      currentText = await page.evaluate(() => {
-        const sections = document.querySelectorAll('section[data-turn="assistant"]');
-        const section = sections[sections.length - 1];
-        if (!section) return '';
-        // Get text from the message area, skipping UI labels like "ChatGPT said:"
-        const msg = section.querySelector('[data-message-author-role="assistant"]');
-        if (msg) {
-          const markdown = msg.querySelector('.markdown');
-          if (markdown) return markdown.innerText?.trim() || '';
-          return msg.innerText?.trim() || '';
-        }
-        return '';
-      }).catch(() => '');
     }
 
     if (!currentText) {
@@ -674,7 +725,7 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
       // After emptyTextFallbackMs of empty text, try copy button extraction.
       if (emptyTextMs >= emptyTextFallbackMs) {
         console.log('[chatgpt] Text still empty, trying copy button extraction...');
-        const copyText = await extractViaCopyButton(page, lastAssistant).catch(() => '');
+        const copyText = await extractViaCopyButton(page).catch(() => '');
         if (copyText) {
           console.log(`[chatgpt] Copy button extraction succeeded (${copyText.length} chars)`);
           return copyText;
@@ -773,7 +824,7 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
   }
 
   // Last resort: try copy button
-  const copyText = await extractViaCopyButton(page, lastAssistant).catch(() => '');
+  const copyText = await extractViaCopyButton(page).catch(() => '');
   if (copyText) {
     console.log(`[chatgpt] Timeout but got response via copy button (${copyText.length} chars)`);
     return copyText;

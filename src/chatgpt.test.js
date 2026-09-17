@@ -5,6 +5,7 @@ import {
   loginStatus,
   ensureLoggedInAtStartup,
   navigateToNewChat,
+  readAssistantTurnText,
 } from './chatgpt.js';
 
 /**
@@ -233,4 +234,84 @@ test('navigateToNewChat forces root navigation even when already at ChatGPT root
   await navigateToNewChat(page);
 
   assert.strictEqual(gotoCount, 1);
+});
+
+// --- readAssistantTurnText: joins ALL message chunks in the last turn ---
+
+/**
+ * Minimal DOM stub for readAssistantTurnText.
+ *
+ * Models the real ChatGPT structure observed Sept 2026:
+ *   section[data-turn="assistant"]  (one per turn)
+ *     └─ N × div[data-message-author-role="assistant"]  (chunks of ONE response)
+ *
+ * @param {Array<{turn: string, chunks: string[]}>} turns
+ */
+function installFakeDocument(turns) {
+  const makeMsg = (text) => ({
+    innerText: text,
+    textContent: text,
+    querySelector: () => null,
+  });
+
+  const sections = turns.map((t) => ({
+    turn: t.turn,
+    querySelectorAll: (sel) => {
+      if (sel === '[data-message-author-role="assistant"]' && t.turn === 'assistant') {
+        return t.chunks.map(makeMsg);
+      }
+      return [];
+    },
+  }));
+
+  globalThis.document = {
+    querySelectorAll: (sel) => {
+      if (sel === 'section[data-turn="assistant"]') {
+        return sections.filter((s) => s.turn === 'assistant');
+      }
+      return [];
+    },
+  };
+  return () => { delete globalThis.document; };
+}
+
+test('readAssistantTurnText concatenates every chunk of a multi-part response', () => {
+  // Regression (cgpt-0x5): ChatGPT splits a long response into MULTIPLE
+  // [data-message-author-role="assistant"] elements inside ONE assistant
+  // turn. Taking .last() returned only the final chunk, so callers received
+  // a response that started mid-document (e.g. at "10. ...").
+  const restore = installFakeDocument([
+    { turn: 'assistant', chunks: ['# Title\n\nIntro', '1. First section', '10. Last section'] },
+  ]);
+  try {
+    const text = readAssistantTurnText();
+    assert.ok(text.startsWith('# Title'), `expected head of response, got: ${text.slice(0, 40)}`);
+    assert.ok(text.includes('1. First section'));
+    assert.ok(text.includes('10. Last section'));
+  } finally {
+    restore();
+  }
+});
+
+test('readAssistantTurnText uses only the LAST assistant turn', () => {
+  const restore = installFakeDocument([
+    { turn: 'assistant', chunks: ['old answer'] },
+    { turn: 'assistant', chunks: ['new answer part 1', 'new answer part 2'] },
+  ]);
+  try {
+    const text = readAssistantTurnText();
+    assert.ok(!text.includes('old answer'));
+    assert.strictEqual(text, 'new answer part 1\n\nnew answer part 2');
+  } finally {
+    restore();
+  }
+});
+
+test('readAssistantTurnText returns empty string when no assistant turn exists', () => {
+  const restore = installFakeDocument([]);
+  try {
+    assert.strictEqual(readAssistantTurnText(), '');
+  } finally {
+    restore();
+  }
 });

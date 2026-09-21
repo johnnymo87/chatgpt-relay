@@ -12,6 +12,7 @@ import { chromium } from 'playwright';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { resolveUserAgent } from './user-agent.js';
 
 const STORAGE_STATE_FILE = process.env.ASK_QUESTION_STORAGE_STATE_FILE ||
   path.join(os.homedir(), '.chatgpt-relay/storage-state.json');
@@ -40,8 +41,17 @@ async function main() {
     ]
   });
 
+  // Pin the same User-Agent the daemon will use. Cloudflare binds
+  // `cf_clearance` to the UA that earned it, so login must mint the clearance
+  // under the daemon's UA or the daemon gets re-challenged (cgpt-60t).
+  // Headed Chrome already reports the reduced, non-headless form, so this is
+  // normally a no-op here - it is the daemon side that changes.
+  const userAgent = await resolveUserAgent(browser);
+  console.log(`[ask-question-login] User-Agent: ${userAgent || '(browser default)'}`);
+
   // Load existing session if available, so credentials persist across runs
   const contextOptions = {};
+  if (userAgent) contextOptions.userAgent = userAgent;
   if (fs.existsSync(STORAGE_STATE_FILE)) {
     contextOptions.storageState = STORAGE_STATE_FILE;
     console.log(`[ask-question-login] Loading existing session from: ${STORAGE_STATE_FILE}`);

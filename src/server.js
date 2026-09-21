@@ -13,6 +13,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { navigateToNewChat, sendPromptAndWait, ensureLoggedInAtStartup } from './chatgpt.js';
+import { resolveUserAgent } from './user-agent.js';
 
 const STORAGE_STATE_FILE = process.env.ASK_QUESTION_STORAGE_STATE_FILE ||
   path.join(os.homedir(), '.chatgpt-relay/storage-state.json');
@@ -40,6 +41,24 @@ function getBrowserLaunchOptions() {
 }
 
 /**
+ * Create the browsing context used to talk to ChatGPT.
+ *
+ * The User-Agent is pinned to a non-headless value because Cloudflare binds
+ * `cf_clearance` to the UA that earned it. `ask-question-login` runs headed,
+ * so a daemon advertising `HeadlessChrome/...` cannot use the clearance cookie
+ * it saved and gets re-challenged with Turnstile (cgpt-60t).
+ */
+async function createChatGptContext(browserInstance) {
+  const userAgent = await resolveUserAgent(browserInstance);
+  const options = {
+    storageState: STORAGE_STATE_FILE,
+    permissions: ['clipboard-read', 'clipboard-write']
+  };
+  if (userAgent) options.userAgent = userAgent;
+  return { context: await browserInstance.newContext(options), userAgent };
+}
+
+/**
  * Ensure the browser is alive and connected. If the browser has crashed
  * or been killed, relaunch it and recreate the context.
  * This prevents the daemon from becoming permanently stuck after a
@@ -57,10 +76,7 @@ async function ensureBrowserAlive() {
   try { await browser?.close(); } catch { /* already dead */ }
 
   browser = await chromium.launch(getBrowserLaunchOptions());
-  context = await browser.newContext({
-    storageState: STORAGE_STATE_FILE,
-    permissions: ['clipboard-read', 'clipboard-write']
-  });
+  ({ context } = await createChatGptContext(browser));
 
   console.log('[ask-question-server] Browser relaunched successfully.');
 }
@@ -322,10 +338,9 @@ async function main() {
   browser = await chromium.launch(launchOpts);
 
   // Create context with saved cookies/localStorage
-  context = await browser.newContext({
-    storageState: STORAGE_STATE_FILE,
-    permissions: ['clipboard-read', 'clipboard-write']
-  });
+  let userAgent;
+  ({ context, userAgent } = await createChatGptContext(browser));
+  console.log(`[ask-question-server] User-Agent: ${userAgent || '(browser default)'}`);
 
   // Open ChatGPT page
   page = await context.newPage();

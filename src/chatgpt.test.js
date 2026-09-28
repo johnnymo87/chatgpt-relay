@@ -418,6 +418,19 @@ test('composer waits are not pinned to the removed #prompt-textarea id', async (
   }
 });
 
+test('locator.innerText() calls are bounded so polling loops cannot stall 30s per iteration', async () => {
+  // Regression: the new UI hides assistant units until the final answer
+  // finishes. If ChatGPT stalls mid-answer, the assistant locator matches
+  // nothing and an unbounded innerText() waits Playwright's default 30s --
+  // per 250ms poll -- turning the ~30s empty-text circuit breaker into ~1h
+  // while the serialized daemon blocks every other request.
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const src = readFileSync(fileURLToPath(new URL('./chatgpt.js', import.meta.url)), 'utf8');
+  const unbounded = src.match(/\.innerText\(\s*\)/g) || [];
+  assert.strictEqual(unbounded.length, 0, `found ${unbounded.length} unbounded locator.innerText() call(s)`);
+});
+
 test('selector sets cover the aria-label-only buttons of the new UI', async () => {
   const { SELECTORS } = await import('./chatgpt.js');
   assert.ok(SELECTORS.composer.includes('[role="textbox"][contenteditable="true"]'));

@@ -578,7 +578,7 @@ async function extractResponseText(page, messageLocator) {
   }
 
   // Last resort: single message element innerText (may be a partial chunk).
-  const text = await messageLocator.innerText();
+  const text = await messageLocator.innerText({ timeout: 2000 }).catch(() => '');
   console.log(`[chatgpt] Extracted via single-message innerText (${text.length} chars) -- may be partial`);
   return text.trim();
 }
@@ -748,7 +748,9 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
     })).trim();
 
     if (!currentText) {
-      currentText = (await lastAssistant.innerText().catch(e => {
+      // Bounded: an unmatched locator would otherwise wait the 30s default on
+      // EVERY poll, defeating the empty-text circuit breaker below.
+      currentText = (await lastAssistant.innerText({ timeout: 1000 }).catch(e => {
         if (!loggedInnerTextError) {
           console.warn(`[chatgpt] innerText failed: ${e.message}`);
           loggedInnerTextError = true;
@@ -1118,7 +1120,7 @@ async function checkErrorStates(page) {
   // Check for error toast (data-testid based)
   const errorToast = page.locator(SELECTORS.errorToast).first();
   if (await errorToast.isVisible({ timeout: 100 }).catch(() => false)) {
-    const errorText = (await errorToast.innerText().catch(() => '')).trim();
+    const errorText = (await errorToast.innerText({ timeout: 1000 }).catch(() => '')).trim();
     // Skip empty text -- likely a non-error ARIA element, not a real toast
     if (errorText) {
       throw new Error(`ChatGPT error: ${errorText}`);

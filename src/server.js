@@ -12,7 +12,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { navigateToNewChat, sendPromptAndWait, ensureLoggedInAtStartup } from './chatgpt.js';
+import { navigateToNewChat, sendPromptAndWait, ensureLoggedInAtStartup, SELECTORS } from './chatgpt.js';
 import { resolveUserAgent } from './user-agent.js';
 
 const STORAGE_STATE_FILE = process.env.ASK_QUESTION_STORAGE_STATE_FILE ||
@@ -101,7 +101,7 @@ async function processRequest(prompt, opts = {}) {
     // Wait for the composer to be ready before accepting the request.
     // ChatGPT's SPA needs time to hydrate after page load.
     try {
-      await page.locator('div#prompt-textarea[contenteditable="true"]')
+      await page.locator(SELECTORS.composer)
         .first().waitFor({ state: 'visible', timeout: 15000 });
       log('Page ready (composer visible).');
     } catch {
@@ -363,7 +363,7 @@ async function main() {
   // hydrate after page load -- the login indicator can appear before React
   // has finished rendering the composer.
   try {
-    await page.locator('div#prompt-textarea[contenteditable="true"]')
+    await page.locator(SELECTORS.composer)
       .first().waitFor({ state: 'visible', timeout: 10000 });
     console.log('[ask-question-server] Composer ready.');
   } catch {

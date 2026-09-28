@@ -141,7 +141,18 @@ function createNetworkGuard(page) {
 
 // Selectors - grouped for easy maintenance when ChatGPT UI changes
 // Note: contenteditable is prioritized because ChatGPT uses a hidden fallback textarea.
-// Last verified: March 2026. ChatGPT uses a ProseMirror contenteditable div.
+//
+// Two DOM generations are supported side by side, because ChatGPT rolls UI
+// changes out gradually and the old one may still be served:
+//   - Legacy (<= mid-Sept 2026): #prompt-textarea, data-testid buttons,
+//     section[data-turn="assistant"] > [data-message-author-role="assistant"].
+//   - New (late Sept 2026): NO ids and NO data-testids. The composer is a bare
+//     ProseMirror div[role=textbox][aria-label="Ask ChatGPT"]; buttons are
+//     identified only by aria-label ("Send", "Stop", "Copy", and "Start Voice"
+//     when the composer is empty); each exchange is a div[data-turn-key]
+//     holding BOTH the user unit and the assistant unit(s)
+//     ([data-content-search-unit-key$=":assistant"]), with the answer text in
+//     [data-markdown-text-style="assistant-message"].
 const COMPOSER_SELECTORS = [
   'div#prompt-textarea[contenteditable="true"]',
   '#prompt-textarea:not([class*="fallback"])',
@@ -151,21 +162,49 @@ const COMPOSER_SELECTORS = [
 
 const SEND_BUTTON_SELECTORS = [
   'button[data-testid="send-button"]',
+  'button[aria-label="Send"]',
   'button[aria-label*="Send"]',
   'form button[type="submit"]'
 ];
 
-const SELECTORS = {
+// Plain-CSS selectors (usable in document.querySelector) for the in-DOM button
+// checks that bypass Playwright's visibility algorithm (see isButtonInDOM).
+// Exact aria-label match for "Stop" so e.g. a "Stop reading aloud" control
+// cannot be mistaken for generation in progress.
+const STOP_BUTTON_DOM = [
+  '[data-testid="stop-button"]',
+  'button[aria-label="Stop"]',
+  'button[aria-label="Stop streaming"]',
+].join(', ');
+
+// "Composer is idle" signal once generation ends. The new UI shows
+// "Start Voice" (not "Send") while the composer is empty.
+const IDLE_BUTTON_DOM = [
+  '[data-testid="send-button"]',
+  'button[aria-label="Send"]',
+  'button[aria-label="Start Voice"]',
+].join(', ');
+
+export const SELECTORS = {
   composer: COMPOSER_SELECTORS.join(', '),
 
   sendButton: SEND_BUTTON_SELECTORS.join(', '),
 
   stopButton: '[data-testid="stop-button"], button[aria-label*="Stop"]',
 
-  assistantMessage: '[data-message-author-role="assistant"]',
+  stopButtonDOM: STOP_BUTTON_DOM,
 
-  // Turn container selector (March 2026: changed from article to section)
-  assistantTurn: 'section[data-turn="assistant"]',
+  idleButtonDOM: IDLE_BUTTON_DOM,
+
+  assistantMessage: [
+    '[data-message-author-role="assistant"]',
+    '[data-content-search-unit-key$=":assistant"]',
+  ].join(', '),
+
+  // Turn container: legacy section per assistant turn, or new per-exchange
+  // div[data-turn-key] (which ALSO contains the user's message -- anything
+  // reading text from it must exclude the user unit).
+  assistantTurn: 'section[data-turn="assistant"], [data-turn-key]',
 
   // Error state selectors
   // Note: [role="alert"] was intentionally removed -- it's too broad and
@@ -185,7 +224,8 @@ const SELECTORS = {
     '[data-testid="continue-button"]'
   ].join(', '),
 
-  copyTurnButton: '[data-testid="copy-turn-action-button"]',
+  // Exact aria-label "Copy": the user message's button is "Copy message".
+  copyTurnButton: '[data-testid="copy-turn-action-button"], button[aria-label="Copy"]',
 
   // Selectors that identify a real ChatGPT login button in the page chrome
   // (header / OAuth dialog), NOT in assistant message content.
@@ -288,7 +328,7 @@ export async function navigateToNewChat(page) {
   // ChatGPT's SPA re-renders the composer after route changes, which can
   // take several seconds. Without this wait, resolveComposer() may fail.
   try {
-    await page.locator('div#prompt-textarea[contenteditable="true"]')
+    await page.locator(SELECTORS.composer)
       .first().waitFor({ state: 'visible', timeout: 10000 });
   } catch {
     // If composer doesn't appear, resolveComposer will handle with fallbacks
@@ -331,11 +371,11 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
   try {
     // Wait for button to be clickable
     await page.waitForFunction(
-      (sel) => {
+      (sels) => sels.some((sel) => {
         const btn = document.querySelector(sel);
         return btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true';
-      },
-      SEND_BUTTON_SELECTORS[0], // Use first selector for check
+      }),
+      SEND_BUTTON_SELECTORS.slice(0, 2), // testid (legacy) or exact aria-label (new UI)
       { timeout: 5000 }
     ).catch(() => {});
 
@@ -368,20 +408,46 @@ export async function sendPromptAndWait(page, prompt, opts = {}) {
  * tail of the answer (e.g. starting at "10. ..."), silently dropping the
  * head. Always aggregate every chunk in the turn.
  *
+ * Supports both DOM generations (see COMPOSER_SELECTORS comment). In the new
+ * UI the turn container (div[data-turn-key]) also holds the USER message, so
+ * text is read only from the assistant units inside it, never the whole turn.
+ *
  * @returns {string}
  */
 export function readAssistantTurnText() {
+  const textOf = (el) => (el.innerText || el.textContent || '').trim();
+  const parts = [];
+
+  // Legacy UI: section[data-turn="assistant"] > [data-message-author-role]
   const sections = document.querySelectorAll('section[data-turn="assistant"]');
   const section = sections[sections.length - 1];
-  if (!section) return '';
+  if (section) {
+    const msgs = section.querySelectorAll('[data-message-author-role="assistant"]');
+    for (const msg of msgs) {
+      const text = textOf(msg.querySelector('.markdown') || msg);
+      if (text) parts.push(text);
+    }
+    return parts.join('\n\n').trim();
+  }
 
-  const msgs = section.querySelectorAll('[data-message-author-role="assistant"]');
-  const parts = [];
-  for (const msg of msgs) {
-    const markdown = msg.querySelector('.markdown');
-    const el = markdown || msg;
-    const text = (el.innerText || el.textContent || '').trim();
-    if (text) parts.push(text);
+  // New UI (late Sept 2026): div[data-turn-key] > assistant unit(s) >
+  // [data-markdown-text-style="assistant-message"] markdown root(s).
+  const turns = document.querySelectorAll('[data-turn-key]');
+  const turn = turns[turns.length - 1];
+  if (!turn) return '';
+
+  const units = turn.querySelectorAll('[data-content-search-unit-key$=":assistant"]');
+  for (const unit of units) {
+    const roots = unit.querySelectorAll('[data-markdown-text-style="assistant-message"]');
+    if (roots.length) {
+      for (const root of roots) {
+        const text = textOf(root);
+        if (text) parts.push(text);
+      }
+    } else {
+      const text = textOf(unit);
+      if (text) parts.push(text);
+    }
   }
   return parts.join('\n\n').trim();
 }
@@ -392,8 +458,12 @@ export function readAssistantTurnText() {
  * @param {import('playwright').Page} page
  * @returns {import('playwright').Locator}
  */
-function lastAssistantTurn(page) {
-  return page.locator(SELECTORS.assistantTurn).last();
+async function lastAssistantTurn(page) {
+  // Prefer the legacy container when present so an unrelated [data-turn-key]
+  // on an old-UI page can never win the document-order .last().
+  const legacy = page.locator('section[data-turn="assistant"]');
+  if (await legacy.count().catch(() => 0) > 0) return legacy.last();
+  return page.locator('[data-turn-key]').last();
 }
 
 /**
@@ -427,14 +497,18 @@ async function extractViaCopyButton(page) {
   // ChatGPT DOM (Sept 2026): section[data-testid][data-turn="assistant"]
   //   > N × div[data-message-author-role="assistant"]
   //   > div (action bar with copy button)
-  const turnContainer = lastAssistantTurn(page);
+  // New UI (late Sept 2026): div[data-turn-key] > ... > button[aria-label="Copy"]
+  // (the user message in the same turn has "Copy message", which is excluded).
+  const turnContainer = await lastAssistantTurn(page);
 
   // Check if turn container was found (DOM structure may have changed)
   if (await turnContainer.count() === 0) {
     throw new Error('Turn container not found');
   }
 
-  const copyBtn = turnContainer.locator(SELECTORS.copyTurnButton);
+  // .last(): a turn with several assistant units can carry several action
+  // bars; an unqualified locator would trip Playwright strict mode.
+  const copyBtn = turnContainer.locator(SELECTORS.copyTurnButton).last();
 
   // Hover the turn container to reveal action buttons (they have pointer-events:none until hover)
   await turnContainer.hover({ timeout: 3000 }).catch(() => {});
@@ -638,7 +712,7 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
     // Check if stop button is in the DOM (multi-phase generation, Extended Thinking).
     // Uses direct DOM query because Playwright's isVisible/waitFor can miss the
     // stop button during Extended Thinking (CSS overlay/opacity differences).
-    if (await isButtonInDOM(page, '[data-testid="stop-button"]')) {
+    if (await isButtonInDOM(page, SELECTORS.stopButtonDOM)) {
       // Stop button is present and has dimensions — generation in progress.
       // Don't log every iteration (250ms), just reset and keep waiting.
       stableMs = 0;
@@ -693,7 +767,7 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
         const el = els[els.length - 1];
         if (!el) return '';
         // Try the .markdown container's text specifically
-        const markdown = el.querySelector('.markdown');
+        const markdown = el.querySelector('.markdown, [data-markdown-text-style="assistant-message"]');
         if (markdown) {
           const text = markdown.innerText?.trim();
           if (text) return text;
@@ -751,7 +825,7 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
         // detect the stop button during Extended Thinking — it's in the DOM
         // with dimensions but Playwright considers it not visible (likely
         // due to CSS overlay or opacity).
-        const stopInDOM = await isButtonInDOM(page, '[data-testid="stop-button"]');
+        const stopInDOM = await isButtonInDOM(page, SELECTORS.stopButtonDOM);
 
         if (stopInDOM) {
           // Stop button in DOM with dimensions — generation in progress.
@@ -762,7 +836,7 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
         }
 
         // Stop button gone. Check send button as confidence signal.
-        const sendInDOM = await isButtonInDOM(page, '[data-testid="send-button"]');
+        const sendInDOM = await isButtonInDOM(page, SELECTORS.idleButtonDOM);
 
         if (sendInDOM) {
           console.log(`[chatgpt] Response stabilized (${currentText.length} chars, send button in DOM)`);
@@ -993,7 +1067,7 @@ async function assertReadyForInput(page) {
   await assertLoggedIn(page);
 
   // Wait for the composer to be visible (SPA may still be hydrating)
-  const composer = page.locator(COMPOSER_SELECTORS[0]).first();
+  const composer = page.locator(SELECTORS.composer).first();
   try {
     await composer.waitFor({ state: 'visible', timeout: 10000 });
   } catch {
@@ -1053,9 +1127,24 @@ async function checkErrorStates(page) {
 
   // Check for "Something went wrong" inside the last assistant turn.
   // Scoped to the turn container to avoid matching the entire page body.
-  const lastTurn = page.locator(SELECTORS.assistantTurn).last();
+  // Strip text that is NOT UI chrome before checking: the user's message (the
+  // new UI's turn container holds it) and the rendered markdown answer. A real
+  // error banner is not markdown, whereas a prompt or answer that merely
+  // mentions "Something went wrong" must not be reported as a ChatGPT error.
+  const lastTurn = await lastAssistantTurn(page);
   if (await lastTurn.count() > 0) {
-    const turnText = await lastTurn.innerText({ timeout: 200 }).catch(() => '');
+    const turnText = await lastTurn.evaluate((el) => {
+      let text = el.innerText || '';
+      const content = el.querySelectorAll(
+        '[data-content-search-unit-key$=":user"], ' +
+        '[data-markdown-text-style="assistant-message"], .markdown'
+      );
+      for (const c of content) {
+        const ct = c.innerText || '';
+        if (ct) text = text.split(ct).join('');
+      }
+      return text;
+    }, null, { timeout: 200 }).catch(() => '');
     if (turnText.includes('Something went wrong')) {
       throw new Error('ChatGPT error: Something went wrong while processing your request.');
     }

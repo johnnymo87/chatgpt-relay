@@ -315,3 +315,116 @@ test('readAssistantTurnText returns empty string when no assistant turn exists',
     restore();
   }
 });
+
+// --- readAssistantTurnText: late-Sept 2026 ChatGPT UI ---
+
+/**
+ * DOM stub for the late-Sept 2026 ChatGPT UI, which dropped
+ * section[data-turn] and data-message-author-role entirely:
+ *
+ *   div[data-turn-key]  (one per exchange: holds the user AND assistant units)
+ *     ├─ div[data-content-search-unit-key="...:0:user"]
+ *     └─ N × div[data-content-search-unit-key="...:K:assistant"]
+ *          └─ M × div[data-markdown-text-style="assistant-message"]
+ *
+ * @param {Array<{user: string, units: Array<{markdown?: string[], text?: string}>}>} turns
+ */
+function installFakeNewDocument(turns) {
+  const el = (text, children = {}) => ({
+    innerText: text,
+    textContent: text,
+    querySelector: (sel) => (children[sel] || [])[0] || null,
+    querySelectorAll: (sel) => children[sel] || [],
+  });
+
+  const turnEls = turns.map((t) => {
+    const units = t.units.map((u) => el(
+      u.text ?? (u.markdown || []).join('\n'),
+      { '[data-markdown-text-style="assistant-message"]': (u.markdown || []).map((m) => el(m)) },
+    ));
+    return el(`${t.user}\n${units.map((u) => u.innerText).join('\n')}`, {
+      '[data-content-search-unit-key$=":assistant"]': units,
+    });
+  });
+
+  globalThis.document = {
+    querySelectorAll: (sel) => (sel === '[data-turn-key]' ? turnEls : []),
+  };
+  return () => { delete globalThis.document; };
+}
+
+test('readAssistantTurnText reads the new data-turn-key DOM (no section[data-turn])', () => {
+  const restore = installFakeNewDocument([
+    { user: 'old question', units: [{ markdown: ['old answer'] }] },
+    { user: 'Something went wrong? question', units: [{ markdown: ['## Head', 'tail DONE'] }] },
+  ]);
+  try {
+    const text = readAssistantTurnText();
+    assert.strictEqual(text, '## Head\n\ntail DONE');
+  } finally {
+    restore();
+  }
+});
+
+test('readAssistantTurnText joins every assistant unit of the last new-DOM turn', () => {
+  const restore = installFakeNewDocument([
+    { user: 'q', units: [{ markdown: ['part 1'] }, { markdown: ['part 2'] }] },
+  ]);
+  try {
+    assert.strictEqual(readAssistantTurnText(), 'part 1\n\npart 2');
+  } finally {
+    restore();
+  }
+});
+
+test('readAssistantTurnText falls back to unit text when a new-DOM unit has no markdown root', () => {
+  const restore = installFakeNewDocument([
+    { user: 'q', units: [{ text: 'plain unit text' }] },
+  ]);
+  try {
+    assert.strictEqual(readAssistantTurnText(), 'plain unit text');
+  } finally {
+    restore();
+  }
+});
+
+test('readAssistantTurnText returns empty when the last new-DOM turn has only the user message', () => {
+  const restore = installFakeNewDocument([
+    { user: 'q1', units: [{ markdown: ['a1'] }] },
+    { user: 'q2 just sent', units: [] },
+  ]);
+  try {
+    assert.strictEqual(readAssistantTurnText(), '');
+  } finally {
+    restore();
+  }
+});
+
+// --- Selector coverage for the late-Sept 2026 UI (no ids, no data-testids) ---
+
+test('composer waits are not pinned to the removed #prompt-textarea id', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  for (const file of ['./chatgpt.js', './server.js']) {
+    const src = readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8');
+    assert.ok(
+      !/locator\(\s*['"]div#prompt-textarea/.test(src),
+      `${file} waits on div#prompt-textarea directly; ChatGPT removed that id (Sept 2026)`
+    );
+    assert.ok(
+      !/COMPOSER_SELECTORS\[0\]/.test(src),
+      `${file} waits on COMPOSER_SELECTORS[0] only; must accept any composer selector`
+    );
+  }
+});
+
+test('selector sets cover the aria-label-only buttons of the new UI', async () => {
+  const { SELECTORS } = await import('./chatgpt.js');
+  assert.ok(SELECTORS.composer.includes('[role="textbox"][contenteditable="true"]'));
+  assert.ok(SELECTORS.sendButton.includes('button[aria-label="Send"]'));
+  assert.ok(SELECTORS.stopButtonDOM.includes('button[aria-label="Stop"]'));
+  assert.ok(SELECTORS.idleButtonDOM.includes('button[aria-label="Start Voice"]'));
+  assert.ok(SELECTORS.copyTurnButton.includes('button[aria-label="Copy"]'));
+  assert.ok(SELECTORS.assistantTurn.includes('[data-turn-key]'));
+  assert.ok(SELECTORS.assistantMessage.includes('[data-content-search-unit-key$=":assistant"]'));
+});

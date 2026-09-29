@@ -431,6 +431,21 @@ test('locator.innerText() calls are bounded so polling loops cannot stall 30s pe
   assert.strictEqual(unbounded.length, 0, `found ${unbounded.length} unbounded locator.innerText() call(s)`);
 });
 
+test('loggedInIndicator covers the late-Sept 2026 app shell (no "Chat history" nav)', async () => {
+  const { SELECTORS } = await import('./chatgpt.js');
+  assert.ok(SELECTORS.loggedInIndicator.includes('button[aria-label="Open profile menu"]'));
+  assert.ok(SELECTORS.loggedInIndicator.includes('a[href^="/c/"]'));
+});
+
+test('login.js uses the shared login selectors instead of a private stale copy', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const src = readFileSync(fileURLToPath(new URL('./login.js', import.meta.url)), 'utf8');
+  assert.ok(/SELECTORS\.loggedInIndicator/.test(src), 'login.js must use SELECTORS.loggedInIndicator');
+  assert.ok(/SELECTORS\.loginButton/.test(src), 'login.js must use SELECTORS.loginButton');
+  assert.ok(!/a\[href\*="\/auth"\]/.test(src), 'login.js must not treat a[href*="/auth"] as a login button');
+});
+
 test('selector sets cover the aria-label-only buttons of the new UI', async () => {
   const { SELECTORS } = await import('./chatgpt.js');
   assert.ok(SELECTORS.composer.includes('[role="textbox"][contenteditable="true"]'));

@@ -249,9 +249,15 @@ export const SELECTORS = {
   // Positive indicators that the user is logged in.
   // At least one must be visible to confirm login state.
   // Note: img[alt="User"] removed March 2026 -- no longer present in ChatGPT UI.
+  // Late Sept 2026: the "Chat history" nav disappeared in an app-shell
+  // rewrite (now nav[aria-label="App navigation"] / "Home"). The profile menu
+  // button and conversation links are only rendered for a signed-in user.
+  // (Deliberately NOT the composer: anonymous ChatGPT has one too.)
   loggedInIndicator: [
     'nav[aria-label="Chat history"]',
-    '#prompt-textarea'
+    '#prompt-textarea',
+    'button[aria-label="Open profile menu"]',
+    'a[href^="/c/"]'
   ].join(', ')
 };
 
@@ -1025,6 +1031,8 @@ async function logIsLoggedInDiagnostics(page, reason) {
     // logged-in indicators
     'nav[aria-label="Chat history"]',
     '#prompt-textarea',
+    'button[aria-label="Open profile menu"]',
+    'a[href^="/c/"]',
     // login-button candidates (the SELECTORS.loginButton compound)
     'button:has-text("Log in")',
     'button:has-text("Sign in")',

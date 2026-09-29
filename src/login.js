@@ -13,6 +13,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { resolveUserAgent } from './user-agent.js';
+import { SELECTORS } from './chatgpt.js';
 
 const STORAGE_STATE_FILE = process.env.ASK_QUESTION_STORAGE_STATE_FILE ||
   path.join(os.homedir(), '.chatgpt-relay/storage-state.json');
@@ -67,17 +68,10 @@ async function main() {
   console.log('[ask-question-login] Waiting for login...');
   console.log('[ask-question-login] (Log in, then wait for "Login detected!" message)');
 
-  const loginButtonSelector = [
-    'button:has-text("Log in")',
-    'button:has-text("Sign in")',
-    'a[href*="/auth"]'
-  ].join(', ');
-
-  const loggedInIndicatorSelector = [
-    'nav[aria-label="Chat history"]',
-    '#prompt-textarea',
-    'img[alt="User"]'
-  ].join(', ');
+  // Shared with the daemon so the two cannot drift apart when ChatGPT's UI
+  // changes (a stale private copy here once left login polling forever).
+  const loginButtonSelector = SELECTORS.loginButton;
+  const loggedInIndicatorSelector = SELECTORS.loggedInIndicator;
 
   // Poll until we detect logged-in state
   const startTime = Date.now();

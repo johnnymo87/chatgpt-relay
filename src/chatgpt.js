@@ -19,12 +19,54 @@ const DEBUG_DIR = path.join(os.homedir(), '.chatgpt-relay', 'debug');
  * @returns {Promise<boolean>}
  */
 async function isButtonInDOM(page, selector) {
-  return await page.evaluate((sel) => {
-    const btn = document.querySelector(sel);
-    if (!btn) return false;
-    const rect = btn.getBoundingClientRect();
-    return rect.height > 0 && rect.width > 0;
-  }, selector).catch(() => false);
+  return await page.evaluate(anyVisibleMatch, selector).catch(() => false);
+}
+
+/**
+ * True if ANY element matching `sel` has non-zero dimensions.
+ *
+ * Runs in the BROWSER (passed to page.evaluate); exported only for unit
+ * tests, so it must stay self-contained. Checks every match, not just the
+ * first: the late-Sept 2026 UI briefly renders duplicate buttons (a
+ * zero-size copy FIRST, the real one second) while React swaps them, and
+ * querySelector() would only ever see the hidden copy.
+ *
+ * @param {string} sel
+ * @returns {boolean}
+ */
+export function anyVisibleMatch(sel) {
+  for (const el of document.querySelectorAll(sel)) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Wait until the stop button has been continuously absent for `settleMs`.
+ *
+ * Replaces Playwright's waitFor({state:'hidden'}), which resolves on the
+ * first instant nothing visible matches -- including the momentary gap while
+ * the new UI swaps one Stop button for another. That made a multi-step answer
+ * (preamble + web searches, ~35s) look finished after ~1s.
+ *
+ * @param {import('playwright').Page} page
+ * @param {{timeout: number, settleMs?: number, pollMs?: number}} opts
+ * @returns {Promise<boolean>} true once settled; false on timeout.
+ */
+export async function waitForStopGone(page, { timeout, settleMs = 2000, pollMs = 250 }) {
+  const neededAbsentPolls = Math.max(1, Math.ceil(settleMs / pollMs));
+  const start = Date.now();
+  let absentPolls = 0;
+  while (Date.now() - start < timeout) {
+    if (await isButtonInDOM(page, SELECTORS.stopButtonDOM)) {
+      absentPolls = 0;
+    } else if (++absentPolls >= neededAbsentPolls) {
+      return true;
+    }
+    await page.waitForTimeout(pollMs);
+  }
+  return false;
 }
 
 /**
@@ -636,7 +678,10 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
   // Step 1: Wait for stop button to APPEAR (generation started)
   console.log('[chatgpt] Waiting for generation to start...');
   try {
-    const startWait = stopBtn.waitFor({ state: 'visible', timeout: 30000 });
+    // filter+first: the new UI can render a hidden duplicate Stop button,
+    // and an unqualified multi-match locator trips Playwright strict mode.
+    const startWait = stopBtn.filter({ visible: true }).first()
+      .waitFor({ state: 'visible', timeout: 30000 });
     if (networkErrorPromise) {
       // Race against network errors
       const result = await Promise.race([startWait, networkErrorPromise]);
@@ -657,15 +702,16 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
   // Step 2: Wait for stop button to DISAPPEAR (generation ended)
   console.log('[chatgpt] Waiting for generation to complete...');
   try {
-    const completeWait = stopBtn.waitFor({ state: 'hidden', timeout });
+    // Settled absence, not a single hidden instant -- see waitForStopGone.
+    const completeWait = waitForStopGone(page, { timeout });
+    let settled;
     if (networkErrorPromise) {
       const result = await Promise.race([completeWait, networkErrorPromise]);
-      if (result?.__networkOk) {
-        await completeWait.catch(() => {});
-      }
+      settled = result?.__networkOk ? await completeWait : result;
     } else {
-      await completeWait;
+      settled = await completeWait;
     }
+    if (!settled) console.log('[chatgpt] Stop button wait timed out');
   } catch (e) {
     if (e.message.includes('Network failure')) throw e;
     console.log('[chatgpt] Stop button wait timed out');
@@ -679,10 +725,14 @@ async function _waitForResponseInner(page, stopBtn, beforeCount, timeout, stream
   const lastAssistant = page.locator(SELECTORS.assistantMessage).last();
 
   // Wait for it to be visible
+  // Not fatal if it is still missing: the new UI renders no assistant unit
+  // while ChatGPT works through a preamble + tool calls. The polling loop
+  // below waits while the stop button is present and has its own empty-text
+  // circuit breaker for a genuinely missing response.
   try {
     await lastAssistant.waitFor({ state: 'visible', timeout: 10000 });
   } catch {
-    throw new Error('No assistant message found after generation completed');
+    console.log('[chatgpt] No assistant message visible yet; continuing to poll...');
   }
 
   // Step 4: Wait for text to stabilize (stops changing for ~1.5s)

@@ -446,6 +446,69 @@ test('login.js uses the shared login selectors instead of a private stale copy',
   assert.ok(!/a\[href\*="\/auth"\]/.test(src), 'login.js must not treat a[href*="/auth"] as a login button');
 });
 
+// --- Button presence: the new UI renders duplicate (hidden + visible) buttons ---
+
+test('anyVisibleMatch sees a visible button even when a hidden duplicate comes first', async () => {
+  // Regression: during React swaps the new UI renders TWO "Stop" (and two
+  // "Start Voice") buttons -- a zero-size one first, the real one second.
+  // querySelector() returned only the hidden first match, so the idle check
+  // never passed (+30s per request) and stop detection could miss generation.
+  const { anyVisibleMatch } = await import('./chatgpt.js');
+  const btn = (w, h) => ({ getBoundingClientRect: () => ({ width: w, height: h }) });
+  globalThis.document = { querySelectorAll: () => [btn(0, 0), btn(36, 36)] };
+  try {
+    assert.strictEqual(anyVisibleMatch('button[aria-label="Start Voice"]'), true);
+    globalThis.document = { querySelectorAll: () => [btn(0, 0)] };
+    assert.strictEqual(anyVisibleMatch('button[aria-label="Start Voice"]'), false);
+    globalThis.document = { querySelectorAll: () => [] };
+    assert.strictEqual(anyVisibleMatch('button[aria-label="Start Voice"]'), false);
+  } finally {
+    delete globalThis.document;
+  }
+});
+
+/**
+ * Mock page whose stop-button presence follows `seq` (one entry per poll,
+ * clamped to the last entry).
+ */
+function stopSequencePage(seq) {
+  let i = 0;
+  return {
+    polls: () => i,
+    evaluate: async () => seq[Math.min(i++, seq.length - 1)],
+    waitForTimeout: async () => {},
+  };
+}
+
+test('waitForStopGone ignores a momentary stop-button gap (button swap)', async () => {
+  // Regression: Playwright waitFor({state:'hidden'}) resolved during a ~1s
+  // swap between two Stop buttons, so a 35s multi-step answer was treated as
+  // finished at ~1s and failed with "No assistant message found".
+  const { waitForStopGone } = await import('./chatgpt.js');
+  const page = stopSequencePage([true, false, true, true, true, false]);
+  const gone = await waitForStopGone(page, { timeout: 5000, settleMs: 1000, pollMs: 250 });
+  assert.strictEqual(gone, true);
+  // Resolves only after the FINAL disappearance has held for settleMs (4 polls).
+  assert.ok(page.polls() >= 9, `resolved too early after ${page.polls()} polls`);
+});
+
+test('waitForStopGone returns false on timeout while generation keeps running', async () => {
+  const { waitForStopGone } = await import('./chatgpt.js');
+  const page = stopSequencePage([true]);
+  assert.strictEqual(await waitForStopGone(page, { timeout: 20, settleMs: 1000, pollMs: 1 }), false);
+});
+
+test('a slow assistant message after the stop button is not a hard failure', async () => {
+  // The new UI renders no assistant unit while ChatGPT works through a
+  // preamble + web searches, so "no message 10s after stop" must fall through
+  // to the polling loop (which has its own empty-text circuit breaker)
+  // instead of throwing.
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const src = readFileSync(fileURLToPath(new URL('./chatgpt.js', import.meta.url)), 'utf8');
+  assert.ok(!src.includes("throw new Error('No assistant message found after generation completed')"));
+});
+
 test('selector sets cover the aria-label-only buttons of the new UI', async () => {
   const { SELECTORS } = await import('./chatgpt.js');
   assert.ok(SELECTORS.composer.includes('[role="textbox"][contenteditable="true"]'));

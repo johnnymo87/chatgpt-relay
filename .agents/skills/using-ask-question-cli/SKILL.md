@@ -1,5 +1,5 @@
 ---
-name: Using ask-question CLI
+name: using-ask-question-cli
 description: Send prompts to ChatGPT via browser automation. Use this when you need to query ChatGPT from the command line or integrate with the /ask-question slash command.
 allowed-tools: [Bash, Read]
 ---

@@ -31,7 +31,7 @@ devenv shell -- ask-question-login
 
 | Skill | Description |
 |-------|-------------|
-| [Using ask-question CLI](.claude/skills/using-ask-question-cli/SKILL.md) | Full usage, troubleshooting, architecture |
+| [Using ask-question CLI](.agents/skills/using-ask-question-cli/SKILL.md) | Full usage, troubleshooting, architecture |
 
 ## Plans
 

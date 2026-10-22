@@ -28,6 +28,7 @@ function mockPage({ url = 'https://chatgpt.com/', winner = 'neither' } = {}) {
         selector.includes('Sign in') || selector.includes('/auth');
 
       return {
+        filter() { return this; },
         first: () => ({
           waitFor: ({ timeout } = {}) => {
             if (isLoginSelector && winner === 'login') return Promise.resolve();
@@ -70,6 +71,7 @@ function mockStatefulPage({ url = 'https://chatgpt.com/', winners = ['neither'] 
       const isLoginSelector = selector.includes('Log in') ||
         selector.includes('Sign in') || selector.includes('/auth');
       return {
+        filter() { return this; },
         first: () => ({
           waitFor: ({ timeout } = {}) => {
             const winner = winners[idx];
@@ -121,6 +123,7 @@ test('isLoggedIn returns false when login button visible even if indicator also 
   const page = {
     url: () => 'https://chatgpt.com/',
     locator: (selector) => ({
+      filter() { return this; },
       first: () => ({
         waitFor: async () => {}, // Both resolve immediately
         isVisible: async () => true
@@ -518,4 +521,25 @@ test('selector sets cover the aria-label-only buttons of the new UI', async () =
   assert.ok(SELECTORS.copyTurnButton.includes('button[aria-label="Copy"]'));
   assert.ok(SELECTORS.assistantTurn.includes('[data-turn-key]'));
   assert.ok(SELECTORS.assistantMessage.includes('[data-content-search-unit-key$=":assistant"]'));
+});
+
+// --- loginStatus against a real DOM: hidden matches must not mask visible ones ---
+
+test('loginStatus is "logged-in" when a hidden indicator precedes a visible one (real browser)', async (t) => {
+  // Regression (Oct 2026): ChatGPT renders button[aria-label="Open profile menu"]
+  // at 0x0 ahead of the visible sidebar. `.first()` on the compound indicator
+  // selector resolved to that hidden button, so waitFor('visible') timed out
+  // and every request failed with "Not logged in" while fully signed in.
+  const { chromium } = await import('playwright');
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined;
+  const browser = await chromium.launch({ headless: true, executablePath });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent(`
+    <button aria-label="Open profile menu" style="width:0;height:0;padding:0;border:0;overflow:hidden"></button>
+    <button style="display:none">Log in</button>
+    <nav aria-label="Chat history"><a href="/c/abc">A chat</a></nav>
+  `);
+
+  assert.strictEqual(await loginStatus(page, { timeout: 2000 }), 'logged-in');
 });

@@ -87,7 +87,7 @@ async function main() {
     }
 
     // If login button is visible, user hasn't logged in yet
-    const loginBtnVisible = await page.locator(loginButtonSelector).first()
+    const loginBtnVisible = await page.locator(loginButtonSelector).filter({ visible: true }).first()
       .isVisible({ timeout: 500 }).catch(() => false);
 
     if (loginBtnVisible) {
@@ -96,7 +96,7 @@ async function main() {
     }
 
     // Login button gone -- verify with a positive indicator
-    const indicatorVisible = await page.locator(loggedInIndicatorSelector).first()
+    const indicatorVisible = await page.locator(loggedInIndicatorSelector).filter({ visible: true }).first()
       .isVisible({ timeout: 500 }).catch(() => false);
 
     if (indicatorVisible) {

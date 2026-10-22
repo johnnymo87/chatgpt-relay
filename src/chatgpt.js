@@ -986,8 +986,13 @@ export async function loginStatus(page, { timeout = 15000 } = {}) {
   // ChatGPT is a SPA -- these elements are rendered by JS after page load,
   // so we need to give the page time to settle rather than doing a quick
   // snapshot check.
-  const loginBtn = page.locator(SELECTORS.loginButton).first();
-  const indicator = page.locator(SELECTORS.loggedInIndicator).first();
+  //
+  // filter+first: these are compound selectors, and `.first()` alone picks the
+  // first match in DOM order whether or not it is visible. ChatGPT renders a
+  // 0x0 "Open profile menu" button ahead of the visible sidebar, which pinned
+  // the indicator to a hidden element and failed every check while signed in.
+  const loginBtn = page.locator(SELECTORS.loginButton).filter({ visible: true }).first();
+  const indicator = page.locator(SELECTORS.loggedInIndicator).filter({ visible: true }).first();
 
   const LOGIN_BTN = 'loginButton';
   const INDICATOR = 'loggedInIndicator';

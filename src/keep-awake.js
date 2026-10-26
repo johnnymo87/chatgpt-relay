@@ -1,5 +1,5 @@
 /**
- * Keep the Mac awake while a request is in flight.
+ * Keep the Mac awake while the server runs.
  *
  * A deep-research answer can take 20-60 minutes. If macOS idle-sleeps in
  * the meantime, the SSH tunnel to the remote client drops and the finished

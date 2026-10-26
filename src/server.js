@@ -202,9 +202,6 @@ function queueRequest(prompt, opts) {
       throw new Error(`Queue wait exceeded ${Math.round(queueWaitMs / 1000)}s`);
     }
 
-    const releaseAwake = holdAwake({
-      log: (m) => console.error(`[ask-question-server] [${opts?.requestId ?? '?'}] ${m}`),
-    });
     return withWatchdog(
       () => processRequest(prompt, opts),
       watchdogMs,
@@ -216,7 +213,7 @@ function queueRequest(prompt, opts) {
         } catch { /* already dead */ }
         page = null;
       }
-    ).finally(releaseAwake);
+    );
   });
   tail = job.catch(() => {}); // swallow for tail only — keeps queue alive
   return job; // caller gets actual result/error
@@ -392,6 +389,12 @@ async function main() {
     console.log('  GET  /health - Health check');
     console.log('[ask-question-server] Ready. Press Ctrl+C to stop.');
   });
+
+  // Keep the Mac awake for the server's whole lifetime, not just while a
+  // request is generating, so the tunnel stays up between questions too.
+  // caffeinate -w exits on its own if this process dies.
+  holdAwake({ log: (m) => console.error(`[ask-question-server] ${m}`) });
+  console.log('[ask-question-server] Holding sleep assertion (caffeinate -i -s) while running.');
 
   // Shutdown handler
   async function shutdown() {

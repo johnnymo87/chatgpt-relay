@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { navigateToNewChat, sendPromptAndWait, ensureLoggedInAtStartup, SELECTORS } from './chatgpt.js';
 import { resolveUserAgent } from './user-agent.js';
+import { holdAwake } from './keep-awake.js';
 
 const STORAGE_STATE_FILE = process.env.ASK_QUESTION_STORAGE_STATE_FILE ||
   path.join(os.homedir(), '.chatgpt-relay/storage-state.json');
@@ -201,6 +202,9 @@ function queueRequest(prompt, opts) {
       throw new Error(`Queue wait exceeded ${Math.round(queueWaitMs / 1000)}s`);
     }
 
+    const releaseAwake = holdAwake({
+      log: (m) => console.error(`[ask-question-server] [${opts?.requestId ?? '?'}] ${m}`),
+    });
     return withWatchdog(
       () => processRequest(prompt, opts),
       watchdogMs,
@@ -212,7 +216,7 @@ function queueRequest(prompt, opts) {
         } catch { /* already dead */ }
         page = null;
       }
-    );
+    ).finally(releaseAwake);
   });
   tail = job.catch(() => {}); // swallow for tail only — keeps queue alive
   return job; // caller gets actual result/error
